@@ -1,65 +1,159 @@
-"""Calibrated, position-specific screen checks and like-button matching."""
+"""Offline OCR for labels; automatic geometry for the unlabelled game icons."""
+from dataclasses import dataclass
+import re
+
 import cv2
 import numpy as np
-from PIL import Image
 
 from .engine import View
 
 
-def array(image):
-    return np.asarray(image.convert("RGB"))
+@dataclass(frozen=True)
+class Text:
+    value: str
+    box: tuple[int, int, int, int]
+    confidence: float
 
+    @property
+    def key(self):
+        return re.sub(r"[^a-z0-9]", "", self.value.lower())
 
-def patch_matches(frame, box, template, tolerance=18):
-    x1, y1, x2, y2 = box
-    patch = frame[y1:y2, x1:x2]
-    if patch.shape != template.shape or not patch.size:
-        return False
-    error = np.abs(patch.astype(np.int16) - template.astype(np.int16))
-    # Require broad agreement, so a single changed word/button is significant.
-    return float(error.mean()) <= tolerance and float(np.percentile(error, 90)) <= 55
+    @property
+    def center(self):
+        x1, y1, x2, y2 = self.box
+        return (x1 + x2) // 2, (y1 + y2) // 2
 
 
 class Recognizer:
-    def __init__(self, folder, config):
-        self.config = config
-        self.templates = {}
-        for role, data in config.items():
-            self.templates[role] = {
-                name: array(Image.open(folder / item["file"]))
-                for name, item in data["markers"].items()
-            }
+    def __init__(self, reader=None):
+        if reader is None:
+            from rapidocr_onnxruntime import RapidOCR
+            # Models ship inside the Python wheel: no Tesseract or model setup.
+            reader = RapidOCR(intra_op_num_threads=2, inter_op_num_threads=1,
+                              det_limit_side_len=960, det_limit_type="max")
+        self.reader = reader
 
-    def inspect(self, role, image):
-        frame = array(image)
-        data = self.config[role]
-        hits = [name for name, item in data["markers"].items()
-                if name != "like" and patch_matches(
-                    frame, item["box"], self.templates[role][name])]
-        # The member stays on the world map while matchmaking.
-        if "queue" in hits and "world" in hits:
-            hits.remove("world")
-        # Ambiguous recognition is never permission to click.
-        state = hits[0] if len(hits) == 1 else "unknown"
-        return View(state, self.find_likes(role, frame) if state == "results" else [])
+    def inspect(self, image):
+        full = np.asarray(image.convert("RGB"))
+        frame, offset = game_frame(full)
+        if frame is None:
+            return View(detail="Use portrait game windows, both fully visible.")
+        # RapidOCR's numpy input uses OpenCV's BGR channel order.
+        result, _ = self.reader(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), use_cls=False)
+        texts = []
+        for polygon, value, confidence in result or []:
+            points = np.asarray(polygon)
+            box = (*points.min(axis=0).astype(int), *points.max(axis=0).astype(int))
+            texts.append(Text(value, tuple(map(int, box)), float(confidence)))
+        view = classify(frame, texts)
+        dx, dy = offset
+        view.targets = {name: (x + dx, y + dy) for name, (x, y) in view.targets.items()}
+        view.likes = [(x + dx, y + dy) for x, y in view.likes]
+        return view
 
-    def find_likes(self, role, frame):
-        template = self.templates[role]["like"]
-        h, w = template.shape[:2]
-        # Restrict search to the calibrated button row, avoiding other UI icons.
-        box = self.config[role]["markers"]["like"]["box"]
-        top, bottom = max(0, box[1] - 15), min(frame.shape[0], box[3] + 15)
-        area = frame[top:bottom]
-        if area.shape[0] < h or area.shape[1] < w:
-            return []
-        scores = cv2.matchTemplate(area, template, cv2.TM_SQDIFF_NORMED)
-        found = []
-        for _ in range(5):
-            score, _, (x, y), _ = cv2.minMaxLoc(scores)
-            if score > 0.025:
-                break
-            if patch_matches(area, (x, y, x + w, y + h), template, tolerance=15):
-                found.append((x + w // 2, top + y + h // 2))
-            scores[max(0, y - h // 2):y + h // 2 + 1,
-                   max(0, x - w // 2):x + w // 2 + 1] = 1
-        return found
+
+def game_frame(frame):
+    """Find a portrait viewport, including games centered in landscape players."""
+    h, w = frame.shape[:2]
+    if .4 <= w / h <= .8:
+        return frame, (0, 0)
+    mask = np.mean(frame[int(h * .1):int(h * .9)].max(axis=2) > 35, axis=0) > .45
+    edges = np.diff(np.r_[False, mask, False].astype(int))
+    spans = [(a, b) for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1))
+             if .4 <= (b - a) / h <= .8]
+    if not spans:
+        return None, (0, 0)
+    left, right = max(spans, key=lambda span: span[1] - span[0])
+    return frame[:, left:right], (int(left), 0)
+
+
+def classify(frame, texts):
+    h, w = frame.shape[:2]
+    words = [t for t in texts if t.confidence >= .65]
+
+    def find(key, region=(0, 0, 1, 1), contains=False):
+        x1, y1, x2, y2 = region
+        hits = [t for t in words if (key in t.key if contains else key == t.key)
+                and x1 * w < t.center[0] < x2 * w
+                and y1 * h < t.center[1] < y2 * h]
+        return hits[0] if len(hits) == 1 else None
+
+    title = find("demonsea", (0, 0, 1, .36), contains=True)
+    accept = find("accept", (.4, .65, 1, .96))
+    decline = find("decline", (0, .65, .6, .96))
+    drops = find("drops", (0, .45, .5, .88))
+    match = find("match", (.4, .65, 1, .96))
+    cancel = find("cancel", (.4, .65, 1, .96))
+    team = find("team", (0, .65, .6, .96), contains=True)
+    matchmaking = find("matchmaking", (0, 0, .35, .5), contains=True)
+
+    if title and accept and decline:
+        return View("accept", targets={"accept": accept.center})
+    if title and drops:
+        likes, ready = find_likes(frame, drops.box[1])
+        arrow = find_return(frame)
+        return View("results", likes, {"return": arrow} if arrow else {},
+                    ready and arrow is not None,
+                    "" if ready and arrow else "Waiting for results buttons and return arrow.")
+    if title and cancel and team:
+        return View("queue")
+    if title and match and team:
+        return View("menu", targets={"match": match.center})
+    if title and matchmaking:
+        return View("queue")
+    # Restrict the world label to the minimap and require its bottom action too.
+    explore = next((t for t in words if "explore" in t.key and t.center[1] > .85 * h), None)
+    if title and title.center[0] > .55 * w and explore:
+        # The dungeon has no text label in-world. Its large entrance occupies
+        # this relative area in the supplied Demonseal Gorge layout.
+        return View("world", targets={"dungeon": (round(.52 * w), round(.35 * h))})
+    return View(detail="Waiting for the next game screen (combat/loading is normal).")
+
+
+def find_likes(frame, drops_y):
+    """Find bright pill-shaped buttons just above Drops, then inspect icon color."""
+    h, w = frame.shape[:2]
+    top, bottom = max(0, int(drops_y - .15 * h)), max(0, int(drops_y - .008 * h))
+    if bottom <= top:
+        return [], False
+    area = frame[top:bottom]
+    hsv = cv2.cvtColor(area, cv2.COLOR_RGB2HSV)
+    mask = (hsv[:, :, 2] > 165).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    buttons = []
+    for contour in contours:
+        x, y, bw, bh = cv2.boundingRect(contour)
+        if not (.065 * w <= bw <= .17 * w and .012 * h <= bh <= .045 * h
+                and 1.7 < bw / bh < 3.8 and cv2.contourArea(contour) / (bw * bh) > .65):
+            continue
+        icon = hsv[y + bh // 5:y + 4 * bh // 5, x + bw // 4:x + 3 * bw // 4]
+        if not icon.size:
+            continue
+        dark = float(np.mean(icon[:, :, 2] < 125))
+        colored = float(np.mean((icon[:, :, 1] > 80) & (icon[:, :, 2] > 125)))
+        if dark < .02 and colored < .04:
+            continue
+        buttons.append(((x + bw // 2, top + y + bh // 2), colored < .08 and dark > .02))
+    if not 1 <= len(buttons) <= 3:
+        return [], False
+    if max(p[0][1] for p in buttons) - min(p[0][1] for p in buttons) > .018 * h:
+        return [], False
+    return [p for p, unclicked in buttons if unclicked], True
+
+
+def find_return(frame):
+    """Find the white left chevron in the lower-left results corner."""
+    h, w = frame.shape[:2]
+    top, right = int(.86 * h), int(.25 * w)
+    hsv = cv2.cvtColor(frame[top:, :right], cv2.COLOR_RGB2HSV)
+    mask = ((hsv[:, :, 1] < 60) & (hsv[:, :, 2] > 185)).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    reference = np.array([(20, 0), (0, 20), (20, 40), (27, 33), (14, 20), (27, 7)], np.int32)
+    hits = []
+    for contour in contours:
+        x, y, bw, bh = cv2.boundingRect(contour)
+        if not (.02 * w < bw < .1 * w and .02 * h < bh < .065 * h and .35 < bw / bh < 1.1):
+            continue
+        if cv2.matchShapes(contour, reference, cv2.CONTOURS_MATCH_I1, 0) < .3:
+            hits.append((x + bw // 2, top + y + bh // 2))
+    return hits[0] if len(hits) == 1 else None

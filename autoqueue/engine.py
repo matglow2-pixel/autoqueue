@@ -10,6 +10,9 @@ class SafetyStop(RuntimeError):
 class View:
     state: str = "unknown"
     likes: list[tuple[int, int]] = field(default_factory=list)
+    targets: dict[str, tuple[int, int]] = field(default_factory=dict)
+    likes_ready: bool = True
+    detail: str = ""
 
 
 @dataclass(frozen=True)
@@ -56,7 +59,7 @@ class Engine:
                 "return": {"world", "menu", "queue"},
             }
             if action.kind == "like":
-                done = view.state == "results" and not any(
+                done = view.state == "results" and self.likes_readable(action.role, view) and not any(
                     self.near(action.point, p) for p in view.likes
                 )
             else:
@@ -71,7 +74,7 @@ class Engine:
             elif now >= deadline:
                 raise SafetyStop(
                     f"{action.role}: could not confirm {action.kind}. "
-                    "Check the game and calibration, then resume."
+                    "Check the game screen, then resume."
                 )
             else:
                 return None
@@ -109,11 +112,13 @@ class Engine:
             # Let avatars/buttons finish appearing before counting zero likes.
             if now - self.results_seen[role] < 2:
                 return None
+            if not self.likes_readable(role, view):
+                return None
             choices = [p for p in view.likes
                        if not any(self.near(p, old) for old in self.liked[role])]
             if choices:
                 if len(self.liked[role]) >= 3:
-                    raise SafetyStop("More than three like buttons found. Recalibrate the like template.")
+                    raise SafetyStop("Unexpected extra like buttons found. Check the game screen.")
                 point = sorted(choices)[0]
                 self.liked[role].append(point)
                 return self.emit(Action(role, "like", point), now, timeout=4)
@@ -131,6 +136,13 @@ class Engine:
     @staticmethod
     def near(a, b):
         return abs(a[0] - b[0]) < 20 and abs(a[1] - b[1]) < 20
+
+    def likes_readable(self, role, view):
+        # Some game versions remove liked buttons instead of recoloring them.
+        # A fully empty row is only completion after all three teammates were
+        # clicked, with the results arrow still positively detected.
+        return view.likes_ready or (len(self.liked[role]) == 3 and not view.likes
+                                    and "return" in view.targets)
 
     def emit(self, action, now, timeout=None):
         self.next_click = now + 0.6

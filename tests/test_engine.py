@@ -119,6 +119,25 @@ class EngineTests(unittest.TestCase):
         action = e.step(views("results", "results", [(100, 700)]), 2)
         self.assertEqual(action.kind, "like")
 
+    def test_missing_like_detection_does_not_exit_fresh_results(self):
+        e = Engine()
+        v = views("results", "results")
+        v["leader"].likes_ready = False
+        self.assertIsNone(e.step(v, 0))
+        self.assertIsNone(e.step(v, 5))
+
+    def test_can_exit_after_all_three_like_buttons_disappear(self):
+        e = Engine()
+        likes = [(100, 700), (300, 700), (500, 700)]
+        e.step(views("results", "results", likes), -2)
+        for t in range(3):
+            action = e.step(views("results", "results", likes), t)
+            likes.remove(action.point)
+        v = views("results", "results")
+        v["leader"].likes_ready = False
+        v["leader"].targets["return"] = (70, 1050)
+        self.assertEqual(e.step(v, 3).kind, "return")
+
 
 if __name__ == "__main__":
     unittest.main()

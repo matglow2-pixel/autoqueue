@@ -55,20 +55,25 @@ class Window:
                 raise SafetyStop(f"{self.title}: another window covers the game. Keep both visible.")
         return x, y, width, height
 
-    def capture(self, expected_size=None):
+    def capture(self):
         x, y, w, h = self.require_visible()
-        if expected_size and [w, h] != list(expected_size):
-            raise SafetyStop(f"{self.title}: size changed. Restore the calibrated size or recalibrate.")
-        return ImageGrab.grab(bbox=(x, y, x + w, y + h), all_screens=True).convert("RGB")
+        image = ImageGrab.grab(bbox=(x, y, x + w, y + h), all_screens=True).convert("RGB")
+        if self.rect() != (x, y, w, h):
+            raise SafetyStop("Window moved during a screen read. Resume once it is in place.")
+        return image
 
-    def click(self, point):
+    def click(self, point, allowed=lambda: True, expected_size=None):
         import pyautogui
         pyautogui.FAILSAFE = True
         pyautogui.failSafeCheck()
         x, y, w, h = self.require_visible()
+        if expected_size and (w, h) != tuple(expected_size):
+            raise SafetyStop("Window resized before input. Stop and Start to use its new size.")
         px, py = map(int, point)
         if not (0 <= px < w and 0 <= py < h):
-            raise SafetyStop("Click is outside the calibrated window.")
+            raise SafetyStop("Click is outside the game window.")
+        if not allowed():
+            raise SafetyStop("Input stopped.")
         if user32.GetForegroundWindow() != self.handle:
             user32.SetForegroundWindow(self.handle)
         if user32.GetForegroundWindow() != self.handle:
@@ -76,6 +81,8 @@ class Window:
         hit = user32.WindowFromPoint(W.POINT(x + px, y + py))
         if user32.GetAncestor(hit, 2) != self.handle:
             raise SafetyStop("Click target is covered by another window.")
+        if not allowed():
+            raise SafetyStop("Input stopped.")
         pyautogui.click(x + px, y + py)
 
 
