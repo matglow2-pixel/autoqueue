@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from PIL import ImageGrab
 
 from .engine import SafetyStop
+from .focus import activate
 
 user32 = C.WinDLL("user32", use_last_error=True)
 user32.GetForegroundWindow.restype = W.HWND
@@ -23,6 +24,86 @@ user32.IsWindowVisible.argtypes = [W.HWND]
 user32.IsIconic.argtypes = [W.HWND]
 user32.IsWindow.argtypes = [W.HWND]
 user32.SetForegroundWindow.argtypes = [W.HWND]
+user32.BringWindowToTop.argtypes = [W.HWND]
+user32.GetWindowThreadProcessId.argtypes = [W.HWND, C.POINTER(W.DWORD)]
+user32.GetWindowThreadProcessId.restype = W.DWORD
+user32.AttachThreadInput.argtypes = [W.DWORD, W.DWORD, W.BOOL]
+user32.GetWindowRect.argtypes = [W.HWND, C.POINTER(W.RECT)]
+user32.SendMessageTimeoutW.argtypes = [W.HWND, W.UINT, W.WPARAM, W.LPARAM,
+                                     W.UINT, W.UINT, C.POINTER(C.c_size_t)]
+user32.SendMessageTimeoutW.restype = C.c_ssize_t
+kernel32 = C.WinDLL("kernel32", use_last_error=True)
+kernel32.GetCurrentThreadId.restype = W.DWORD
+
+
+class DesktopFocus:
+    @staticmethod
+    def foreground():
+        handle = user32.GetForegroundWindow()
+        return user32.GetAncestor(handle, 2) if handle else None
+
+    @staticmethod
+    def thread_id():
+        # AttachThreadInput requires a message queue on the calling worker.
+        message = W.MSG()
+        user32.PeekMessageW(C.byref(message), None, 0, 0, 0)
+        return kernel32.GetCurrentThreadId()
+
+    @staticmethod
+    def window_thread(handle):
+        return user32.GetWindowThreadProcessId(handle, None) if handle else 0
+
+    @staticmethod
+    def attach(current, other, enabled):
+        return bool(user32.AttachThreadInput(current, other, enabled))
+
+    @staticmethod
+    def bring_to_top(handle):
+        user32.BringWindowToTop(handle)
+
+    @staticmethod
+    def set_foreground(handle):
+        user32.SetForegroundWindow(handle)
+
+    @staticmethod
+    def activation_point(handle):
+        """Find visible draggable caption chrome, never a game-surface point."""
+        rect = W.RECT()
+        if not user32.GetWindowRect(handle, C.byref(rect)):
+            return None
+        title = C.create_unicode_buffer(user32.GetWindowTextLengthW(handle) + 1)
+        user32.GetWindowTextW(handle, title, len(title))
+        # BlueStacks uses custom chrome which can report HTCLIENT instead of
+        # HTCAPTION. Its instance title occupies the first 28 pixels at the top,
+        # between the logo and toolbar buttons, in the supplied player layout.
+        bluestacks = "bluestacks app player" in title.value.lower()
+        custom_caption = None
+        width = rect.right - rect.left
+        for dy in (14, 22, 8, 28):
+            for dx in (min(100, int(width * .2)), int(width * .35)):
+                x, y = rect.left + dx, rect.top + dy
+                hit = user32.WindowFromPoint(W.POINT(x, y))
+                if user32.GetAncestor(hit, 2) != handle:
+                    continue
+                result = C.c_size_t()
+                packed = (x & 0xffff) | ((y & 0xffff) << 16)
+                if not user32.SendMessageTimeoutW(handle, 0x0084, 0, packed, 2, 20, C.byref(result)):
+                    continue
+                if result.value == 2:  # HTCAPTION: safe native caption activation.
+                    return x, y
+                if bluestacks and result.value == 1 and dx <= 100 and dy <= 22:
+                    custom_caption = custom_caption or (x, y)
+        return custom_caption
+
+    @staticmethod
+    def click_caption(handle, point):
+        import pyautogui
+        # Confirm that the activation point is still part of the visible title
+        # bar; another application may have moved or appeared during the wait.
+        if DesktopFocus.activation_point(handle) != point:
+            raise SafetyStop("Title bar changed during activation. Keep both game windows visible.")
+        pyautogui.failSafeCheck()
+        pyautogui.click(*point, _pause=False)
 
 
 def enable_dpi_awareness():
@@ -62,6 +143,10 @@ class Window:
             raise SafetyStop("Window moved during a screen read. Resume once it is in place.")
         return image
 
+    def focus(self, allowed=lambda: True):
+        self.require_visible()
+        activate(DesktopFocus(), self.handle, allowed)
+
     def click(self, point, allowed=lambda: True, expected_size=None):
         import pyautogui
         pyautogui.FAILSAFE = True
@@ -74,16 +159,15 @@ class Window:
             raise SafetyStop("Click is outside the game window.")
         if not allowed():
             raise SafetyStop("Input stopped.")
-        if user32.GetForegroundWindow() != self.handle:
-            user32.SetForegroundWindow(self.handle)
-        if user32.GetForegroundWindow() != self.handle:
-            raise SafetyStop("Windows blocked focusing the game. Click it manually and resume.")
+        if DesktopFocus.foreground() != self.handle:
+            return False  # Focus changed after OCR. Let the runner read again.
         hit = user32.WindowFromPoint(W.POINT(x + px, y + py))
         if user32.GetAncestor(hit, 2) != self.handle:
             raise SafetyStop("Click target is covered by another window.")
         if not allowed():
             raise SafetyStop("Input stopped.")
-        pyautogui.click(x + px, y + py)
+        pyautogui.click(x + px, y + py, _pause=False)
+        return True
 
 
 def list_windows():

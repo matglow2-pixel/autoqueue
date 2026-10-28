@@ -92,7 +92,12 @@ class Runner(threading.Thread):
                 if action is None:
                     self.engine = planned
                 else:
-                    # OCR is repeated on a new screenshot immediately before input.
+                    # Activate first: Windows may need a title-bar click before
+                    # it will focus another process. Read again after that, so
+                    # a focus click can never double as a stale game action.
+                    self.targets[action.role].focus(allowed=self.control.active)
+                    if not self.control.active():
+                        continue
                     fresh = self.observe(action.role)
                     if not self.control.active():
                         continue
@@ -102,8 +107,11 @@ class Runner(threading.Thread):
                     with self.control.lock:
                         if not self.control.active():
                             continue
-                        self.targets[action.role].click(point, allowed=self.control.active,
-                                                       expected_size=self.sizes[action.role])
+                        sent = self.targets[action.role].click(
+                            point, allowed=self.control.active,
+                            expected_size=self.sizes[action.role])
+                        if sent is False:
+                            continue
                         clicked_at = self.control.now()
                         planned.next_click = clicked_at + .6
                         if action.kind == "accept":

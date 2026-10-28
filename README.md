@@ -1,4 +1,4 @@
-# Sword x Staff Autoqueue — OCR edition
+# Sword x Staff Autoqueue — OCR 1.1
 
 **Choose Leader, choose Member, press Start. No calibration.**
 
@@ -49,6 +49,12 @@ using the PC for something else. No ADB is required.
    until stopped, including after daily reward attempts are exhausted.
 
 OCR runs in the background so the control window and stop key remain responsive.
+When switching accounts, the app temporarily shares Windows input queues to
+request focus and waits for activation. If Windows still denies the request,
+it can click the visible BlueStacks title bar to activate that window. It then
+reads the game screen again before sending the separate game-button click.
+This avoids the immediate "Windows blocked focusing the game" pause in the
+previous version. Input-queue attachments are released after each focus request.
 The app reads a fresh screenshot before clicking a text button. Loading, combat
 and unrecognized screens cause waiting without clicks. Failed action confirmations,
 covered windows and blocked focus cause a pause with an explanation in the log.
@@ -67,6 +73,9 @@ It does not dismiss unrelated popups or change party membership automatically.
   it the buttons.
 - **It pauses after clicking:** inspect the game. If you manually change screens
   to recover, Stop, put both accounts outside, then Start a new session.
+- **It cannot activate a window:** keep both BlueStacks title bars visible. Run
+  both BlueStacks and Autoqueue normally, or at the same administrator permission
+  level if you intentionally run BlueStacks as administrator.
 
 Watch the first complete cycle on your PC. The detection is designed for the
 Demonseal Gorge UI in the supplied screenshots. Real game fonts, animations,
@@ -85,5 +94,7 @@ three teammate likes, exit ordering, the two-second handoff, pause timing,
 results-button detection at different sizes, already-liked icons, letterboxing,
 low-confidence/context rejection and stopping during a blocked OCR read.
 An integration test runs the actual bundled OCR models on generated button screens.
+Focus regressions cover delayed activation, denied requests, title-bar fallback,
+attachment cleanup, cancellation and retrying an unsent click after focus changes.
 Those fixtures are not live game captures; passing them does not establish live
 BlueStacks accuracy. The Windows desktop adapter cannot execute on Linux.

@@ -16,11 +16,46 @@ class FakeWindow:
     def capture(self):
         return Image.new('RGB', (600, 1100))
 
+    def focus(self, allowed):
+        if not allowed():
+            raise RuntimeError('Stopped before focus')
+
     def click(self, point, **kwargs):
         self.clicks.append(point)
 
 
 class RunnerTests(unittest.TestCase):
+    def test_lost_focus_does_not_commit_an_unsent_game_click(self):
+        order = []
+        class WorldOCR:
+            def inspect(self, image):
+                order.append('read')
+                return View('world', targets={'dungeon': (300, 380)})
+        class FocusWindow(FakeWindow):
+            def focus(self, allowed):
+                super().focus(allowed)
+                order.append('focus')
+
+            def click(self, point, **kwargs):
+                order.append('click')
+                self.clicks.append(point)
+                if len(self.clicks) == 1:
+                    return False  # Desktop focus changed before sending input.
+                runner.control.stop()
+                return True
+        windows = {'leader': FocusWindow(), 'member': FakeWindow()}
+        runner = Runner(windows, queue.SimpleQueue(), recognizer_factory=WorldOCR)
+        runner.start()
+        runner.join(3)
+        try:
+            self.assertFalse(runner.is_alive())
+            self.assertEqual(windows['leader'].clicks, [(300, 380), (300, 380)])
+            self.assertEqual(order[:5], ['read', 'read', 'focus', 'read', 'click'])
+            self.assertEqual(runner.engine.pending[0].kind, 'dungeon')
+        finally:
+            runner.control.stop()
+            runner.join(2)
+
     def test_stop_during_slow_ocr_cancels_planned_mouse_input(self):
         entered, release = threading.Event(), threading.Event()
         class SlowOCR:
