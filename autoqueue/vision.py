@@ -51,16 +51,24 @@ class Recognizer:
             _, _, view, anchors = cached
             if all(anchor_matches(frame, box, patch) for box, patch in anchors):
                 return translate(view, offset)
-        # RapidOCR's numpy input uses OpenCV's BGR channel order.
-        result, _ = self.reader(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), use_cls=False)
-        texts = read_texts(result)
+        # Read only controls/minimap labels first. Hero art and chat no longer
+        # pass through OCR on every initial button read.
+        atlas, regions = control_atlas(frame)
+        result, _ = self.reader(cv2.cvtColor(atlas, cv2.COLOR_RGB2BGR), use_cls=False)
+        texts = []
+        for item in read_texts(result):
+            for start, end, box in regions:
+                x1, y1, x2, y2 = item.box
+                left, top, right, _ = box
+                if start <= y1 <= y2 <= end and 0 <= x1 <= x2 <= right - left:
+                    texts.append(Text(item.value, (x1 + left, y1 - start + top,
+                                                  x2 + left, y2 - start + top), item.confidence))
+                    break
         view = classify(frame, texts)
-        if view.state == "unknown" and yellow_button_present(frame):
-            # Stylized headings and portrait art can interfere with a full-
-            # screen pass. Read just the bottom controls as a focused fallback.
-            strip_y = int(.62 * frame.shape[0])
-            result, _ = self.reader(cv2.cvtColor(frame[strip_y:], cv2.COLOR_RGB2BGR), use_cls=False)
-            for item in read_texts(result, dy=strip_y):
+        if view.state == "unknown":
+            # Full-frame OCR is a fallback, not a prerequisite for clicking.
+            result, _ = self.reader(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), use_cls=False)
+            for item in read_texts(result):
                 duplicates = [t for t in texts if t.key == item.key
                               and abs(t.center[0] - item.center[0]) < 20
                               and abs(t.center[1] - item.center[1]) < 20]
@@ -72,9 +80,29 @@ class Recognizer:
         self.cache.pop(role, None)
         if view.state in {"world", "menu", "queue", "accept"}:
             anchors = cache_anchors(frame, view.state, texts)
-            if len(anchors) >= 2:
+            if len(anchors) >= 2 or (view.state == "queue" and anchors):
                 self.cache[role] = (frame.shape, time.monotonic(), view, anchors)
         return translate(view, offset)
+
+
+def control_atlas(frame):
+    h, w = frame.shape[:2]
+    if yellow_button_present(frame):
+        boxes = [(0, int(.65 * h), w, h)]
+    else:
+        boxes = [(0, int(.72 * h), w, h),
+                 (int(.64 * w), int(.16 * h), w, int(.36 * h)),
+                 (0, int(.22 * h), int(.34 * w), int(.45 * h))]
+    height = sum(y2 - y1 + 12 for _, y1, _, y2 in boxes)
+    atlas = np.zeros((height, w, 3), np.uint8)
+    regions = []
+    start = 0
+    for x1, y1, x2, y2 in boxes:
+        end = start + y2 - y1
+        atlas[start:end, :x2-x1] = frame[y1:y2, x1:x2]
+        regions.append((start, end, (x1, y1, x2, y2)))
+        start = end + 12
+    return atlas, regions
 
 
 def read_texts(result, dy=0):
@@ -172,9 +200,7 @@ def classify(frame, texts):
             and (title or button_pair_colors(frame, decline.center, accept.center))):
         return View("accept", targets={"accept": accept.center})
     if title and drops:
-        likes, ready = find_likes(frame, drops.box[1])
-        arrow = find_return(frame)
-        return results_view(likes, ready, arrow)
+        return results_layout(frame, drops.box[3] + int(.006 * h))
     if cancel and team:
         return View("queue", detail="Waiting for a match; Accept is monitored.")
     if match and team and (title or button_pair_colors(frame, team.center, match.center)):
@@ -252,7 +278,7 @@ def find_likes(frame, drops_y, min_buttons=1):
             if any(abs(point[0] - p[0]) < .035 * w and abs(point[1] - p[1]) < .015 * h for p, _ in buttons):
                 continue
             buttons.append((point, is_white and colored < .08 and dark > .02))
-    if not min_buttons <= len(buttons) <= 3:
+    if not min_buttons <= len(buttons) <= 4:
         return [], False
     if max(p[0][1] for p in buttons) - min(p[0][1] for p in buttons) > .018 * h:
         return [], False
@@ -293,26 +319,72 @@ def is_left_chevron(component):
     return False
 
 
-def results_view(likes, ready, arrow):
-    detail = (f"{len(likes)} unclicked likes" if ready else "Waiting for like buttons")
-    detail += "; exit found" if arrow else "; waiting for exit arrow"
-    # Like detection does not depend on successful exit-arrow detection.
-    return View("results", likes, {"return": arrow} if arrow else {}, ready, detail)
+def results_layout(frame, divider_y):
+    """Target actual unclicked thumbs, followed by the bottom-left exit area."""
+    h, w = frame.shape[:2]
+    points = find_like_icons(frame, divider_y)
+    targets = {f"like_{i + 1}": p for i, p in enumerate(points)}
+    targets["return"] = find_return(frame) or (round(.11 * w), round(.955 * h))
+    return View("results", points, targets, True, f"{len(points)} thumbs-up icons; bottom-left Exit ready.")
+
+
+def find_like_icons(frame, divider_y):
+    """White rounded buttons with dark thumbs; never gold own-player counters."""
+    h, w = frame.shape[:2]
+    top = max(0, round(divider_y - .18 * w))
+    bottom = min(h, round(divider_y - .045 * w))
+    if bottom <= top:
+        return []
+    area = frame[top:bottom]
+    hsv = cv2.cvtColor(area, cv2.COLOR_RGB2HSV)
+    white = ((hsv[:, :, 1] < 75) & (hsv[:, :, 2] > 155)).astype(np.uint8) * 255
+    white = cv2.morphologyEx(white, cv2.MORPH_CLOSE,np.ones((3, 3), np.uint8))
+    contours, _ = cv2.findContours(white, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    candidates = []
+    expected_y = divider_y - .11 * w
+    for contour in contours:
+        x, y, bw, bh = cv2.boundingRect(contour)
+        fill = cv2.contourArea(contour) / (bw * bh)
+        if not (.055 * w < bw < .20 * w and .018 * w < bh < .085 * w
+                and 1.7 < bw / bh < 4.5 and fill > .55):
+            continue
+        center = hsv[y + bh // 5:y + 4 * bh // 5, x + bw // 4:x + 3 * bw // 4]
+        dark = np.mean(center[:, :, 2] < 130)
+        colored = np.mean((center[:, :, 1] > 80) & (center[:, :, 2] > 125))
+        if dark < .03 or colored > .08:
+            continue
+        point = (x + bw // 2, top + y + bh // 2)
+        candidates.append((fill - abs(point[1] - expected_y) / w, point))
+    return sorted(p for _, p in sorted(candidates, reverse=True)[:4])
+
+
+def rank_banner(frame):
+    h = frame.shape[0]
+    hsv = cv2.cvtColor(frame[int(.10 * h):int(.36 * h)], cv2.COLOR_RGB2HSV)
+    yellow = ((hsv[:, :, 0] > 18) & (hsv[:, :, 0] < 48)
+              & (hsv[:, :, 1] > 55) & (hsv[:, :, 1] < 220) & (hsv[:, :, 2] > 140))
+    rows = np.mean(yellow, axis=1) > .60
+    edges = np.diff(np.r_[False, rows, False].astype(int))
+    return any(b - a >= .025 * h for a, b in
+               zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)))
 
 
 def results_fast(frame):
-    """The long Drops divider plus a row of thumbs identifies the end screen."""
+    """Rank banner + Drops divider identify results even if thumbs are missed."""
     h, w = frame.shape[:2]
     top, bottom = int(.55 * h), int(.84 * h)
     hsv = cv2.cvtColor(frame[top:bottom], cv2.COLOR_RGB2HSV)
     mask = ((hsv[:, :, 1] < 70) & (hsv[:, :, 2] > 100)).astype(np.uint8) * 255
     lines = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((1, max(1, int(.65 * w))), np.uint8))
     contours, _ = cv2.findContours(lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    banner = rank_banner(frame)
     for contour in contours:
         _, y, bw, bh = cv2.boundingRect(contour)
         if bw < .7 * w or bh > .008 * h:
             continue
-        likes, ready = find_likes(frame, top + y - int(.02 * h), min_buttons=2)
+        if banner:
+            return results_layout(frame, top + y)
+        _, ready = find_likes(frame, top + y - int(.02 * h), min_buttons=2)
         if ready:
-            return results_view(likes, True, find_return(frame))
+            return results_layout(frame, top + y)
     return None

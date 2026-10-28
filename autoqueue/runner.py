@@ -55,6 +55,8 @@ class Runner(threading.Thread):
         self.engine = Engine()
         self.sizes = {}
         self.resume_generation = 0
+        self.cleanup_progress = {}
+        self.cleanup_sequences = {}
 
     def send(self, kind, text):
         self.events.put((kind, text))
@@ -66,7 +68,35 @@ class Runner(threading.Thread):
         if role in self.sizes and size != self.sizes[role]:
             raise SafetyStop("Window resized. Stop and Start to use its new size.")
         self.sizes[role] = size
-        return self.recognizer.inspect(image, role=role)
+        view = self.recognizer.inspect(image, role=role)
+        if view.state in {"world", "menu", "queue"}:
+            self.cleanup_progress.pop(role, None)
+            self.cleanup_sequences.pop(role, None)
+        return view
+
+    def cleanup(self, role, view):
+        points = self.cleanup_sequences.get(role) or cleanup_points(view)
+        if points is None:
+            return False
+        self.cleanup_sequences[role] = points
+        index = self.cleanup_progress.get(role, 0)
+        if index == 0:
+            self.send("log", f"{role}: clicking {len(points) - 1} thumbs-up icons, then Exit.")
+        while index < len(points):
+            with self.control.lock:
+                if not self.control.active():
+                    return False
+                sent = self.targets[role].click(points[index], allowed=self.control.active,
+                                                expected_size=self.sizes[role])
+                if sent is False:
+                    return False
+                index += 1
+                self.cleanup_progress[role] = index
+            # Let Windows dispatch this tap, without another screenshot/OCR or
+            # per-like acknowledgement. Pause/Stop can interrupt the sequence.
+            if index < len(points):
+                self.control.stopped.wait(.01)
+        return True
 
     def run(self):
         try:
@@ -102,6 +132,9 @@ class Runner(threading.Thread):
                 summary = "; ".join(f"{r}: {v.state}" + (f" ({v.detail})" if v.detail else "")
                                     for r, v in views.items())
                 self.send("status", f"{self.engine.runs} cycles completed · {summary}")
+                remaining = self.engine.requeue_at - self.control.now()
+                if remaining > 0 and all(v.state in {"world", "menu"} for v in views.values()):
+                    self.send("status", f"Waiting {remaining:.1f}s for dungeon reload after leader Exit.")
                 planned = copy.deepcopy(self.engine)
                 decision_time = self.control.now()
                 action = planned.step(views, decision_time)
@@ -117,21 +150,31 @@ class Runner(threading.Thread):
                     fresh = self.observe(action.role)
                     if not self.control.active():
                         continue
-                    point = action_point(action, fresh, all_liked=len(planned.liked[action.role]) == 3)
-                    if point is None:
+                    if action.kind == "cleanup":
+                        sent = self.cleanup(action.role, fresh)
+                        if not sent:
+                            continue
+                    else:
+                        point = action_point(action, fresh)
+                        if point is None:
+                            continue
+                    if not self.control.active() and action.kind != "cleanup":
                         continue  # A changed/unreadable screen never authorizes input.
                     with self.control.lock:
-                        if not self.control.active():
+                        if not self.control.active() and action.kind != "cleanup":
                             continue
-                        sent = self.targets[action.role].click(
-                            point, allowed=self.control.active,
-                            expected_size=self.sizes[action.role])
-                        if sent is False:
-                            continue
+                        if action.kind != "cleanup":
+                            sent = self.targets[action.role].click(
+                                point, allowed=self.control.active,
+                                expected_size=self.sizes[action.role])
+                            if sent is False:
+                                continue
                         clicked_at = self.control.now()
                         planned.next_click = clicked_at
                         if action.kind == "accept":
                             planned.last_accept = clicked_at
+                        if action.kind == "cleanup" and action.role == "leader":
+                            planned.requeue_at = clicked_at + 5
                         if planned.pending:
                             pending_action, deadline = planned.pending
                             if deadline is not None:
@@ -147,15 +190,15 @@ class Runner(threading.Thread):
             self.control.stopped.wait(.02)
 
 
-def action_point(action, view, all_liked=False):
-    expected = {"dungeon": "world", "match": "menu", "accept": "accept",
-                "like": "results", "return": "results"}[action.kind]
+def action_point(action, view):
+    expected = {"dungeon": "world", "match": "menu", "accept": "accept"}[action.kind]
     if view.state != expected:
         return None
-    if action.kind == "like":
-        if not view.likes_ready:
-            return None
-        return next((p for p in view.likes if Engine.near(action.point, p)), None)
-    if action.kind == "return" and (view.likes or not (view.likes_ready or all_liked)):
-        return None
     return view.targets.get(action.kind)
+
+
+def cleanup_points(view):
+    if view.state != "results" or not view.likes_ready or "return" not in view.targets:
+        return None
+    keys = tuple(f"like_{i}" for i in range(1, 5) if f"like_{i}" in view.targets) + ("return",)
+    return tuple(view.targets[k] for k in keys)

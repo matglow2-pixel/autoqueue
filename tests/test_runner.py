@@ -6,7 +6,13 @@ from unittest.mock import patch
 from PIL import Image
 
 from autoqueue.engine import Action, View
-from autoqueue.runner import Control, Runner, action_point
+from autoqueue.runner import Control, Runner, action_point, cleanup_points
+
+
+def results_view():
+    return View('results', targets={
+        'like_1': (100, 715), 'like_2': (250, 715), 'like_3': (400, 715),
+        'like_4': (520, 715), 'return': (66, 1050)})
 
 
 class FakeWindow:
@@ -116,10 +122,89 @@ class RunnerTests(unittest.TestCase):
         self.assertIsNone(action_point(action, View('queue')))
         self.assertIsNone(action_point(action, View('menu')))
         self.assertEqual(action_point(action, View('menu', targets={'match': (450, 950)})), (450, 950))
-        exit_action = Action('leader', 'return')
-        self.assertIsNone(action_point(exit_action, View('results', [(100, 700)], {'return': (70, 1050)})))
-        self.assertIsNone(action_point(exit_action, View('results', [], {'return': (70, 1050)}, False)))
-        self.assertEqual(action_point(exit_action, View('results', [], {'return': (70, 1050)}, False), all_liked=True), (70, 1050))
+        self.assertIsNone(cleanup_points(View('world')))
+        self.assertIsNone(cleanup_points(View('results', likes_ready=False)))
+        self.assertEqual(cleanup_points(results_view()),
+                         ((100, 715), (250, 715), (400, 715), (520, 715), (66, 1050)))
+
+    def test_cleanup_clicks_all_detected_icons_then_exit_without_more_ocr(self):
+        windows = {'leader': FakeWindow(), 'member': FakeWindow()}
+        runner = Runner(windows, queue.SimpleQueue())
+        runner.sizes['member'] = (600, 1100)
+        view = results_view()
+        self.assertTrue(runner.cleanup('member', view))
+        self.assertEqual(windows['member'].clicks, list(cleanup_points(view)))
+        self.assertEqual(windows['leader'].clicks, [])
+        self.assertTrue(runner.cleanup('member', view))
+        self.assertEqual(len(windows['member'].clicks), 5)
+
+    def test_cleanup_stop_interrupts_before_exit(self):
+        class StoppingWindow(FakeWindow):
+            def click(self, point, **kwargs):
+                self.clicks.append(point)
+                if len(self.clicks) == 2:
+                    runner.control.stop()
+                return True
+        window = StoppingWindow()
+        runner = Runner({'leader': FakeWindow(), 'member': window}, queue.SimpleQueue())
+        runner.sizes['member'] = (600, 1100)
+        self.assertFalse(runner.cleanup('member', results_view()))
+        self.assertEqual(window.clicks, [(100, 715), (250, 715)])
+
+    def test_cleanup_retains_progress_when_focus_is_lost(self):
+        class InterruptedWindow(FakeWindow):
+            failed = False
+            def click(self, point, **kwargs):
+                if len(self.clicks) == 2 and not self.failed:
+                    self.failed = True
+                    return False
+                self.clicks.append(point)
+                return True
+        window = InterruptedWindow()
+        runner = Runner({'leader': FakeWindow(), 'member': window}, queue.SimpleQueue())
+        runner.sizes['member'] = (600, 1100)
+        self.assertFalse(runner.cleanup('member', results_view()))
+        # Already-liked icons can disappear from a later screenshot. Continue
+        # the original authorized sequence without double-clicking prior icons.
+        changed_view = View('results', targets={'like_1': (400, 715), 'return': (66, 1050)})
+        self.assertTrue(runner.cleanup('member', changed_view))
+        self.assertEqual(window.clicks, list(cleanup_points(results_view())))
+
+    def test_complete_cleanup_order_is_member_then_leader_with_five_second_requeue_wait(self):
+        states = {'leader': 'results', 'member': 'results'}
+        clicks = []
+        reads = []
+        exit_times = {}
+        class ResultsOCR:
+            def inspect(self, image, role='default'):
+                reads.append(role)
+                return results_view() if states[role] == 'results' else View('world')
+        class ResultsWindow(FakeWindow):
+            def __init__(self, role):
+                super().__init__()
+                self.role = role
+
+            def click(self, point, **kwargs):
+                clicks.append((self.role, point))
+                if point == (66, 1050):
+                    states[self.role] = 'world'
+                    exit_times[self.role] = runner.control.now()
+                    if self.role == 'leader':
+                        runner.control.stop()
+                return True
+        windows = {r: ResultsWindow(r) for r in states}
+        runner = Runner(windows, queue.SimpleQueue(), recognizer_factory=ResultsOCR)
+        runner.start()
+        runner.join(3)
+        try:
+            self.assertFalse(runner.is_alive())
+            points = cleanup_points(results_view())
+            self.assertEqual(clicks, [('member', p) for p in points] + [('leader', p) for p in points])
+            self.assertEqual(len(reads), 6)  # No OCR pass between individual likes.
+            self.assertGreaterEqual(runner.engine.requeue_at, exit_times['leader'] + 5)
+        finally:
+            runner.control.stop()
+            runner.join(2)
 
 
 if __name__ == '__main__':

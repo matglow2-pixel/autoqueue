@@ -67,7 +67,7 @@ class VisionTests(unittest.TestCase):
         self.assertEqual(classify(self.frame, labels).state, "queue")
         self.assertEqual(classify(self.frame, [text("Matchmaking...", 100, 340)]).state, "queue")
 
-    def test_bottom_controls_get_focused_ocr_when_full_frame_is_unreadable(self):
+    def test_full_frame_fallback_recovers_unreadable_control_atlas(self):
         frame = self.frame.copy()
         cv2.rectangle(frame, (30, 925), (285, 975), (225, 225, 225), -1)
         cv2.rectangle(frame, (310, 925), (575, 975), (205, 216, 75), -1)
@@ -76,13 +76,12 @@ class VisionTests(unittest.TestCase):
             calls.append(image.shape)
             if len(calls) == 1:
                 return None, None
-            # Coordinates in the cropped lower control strip.
-            y = 950 - int(.62 * 1100)
+            y = 950
             return [([[x-30, y-10], [x+30, y-10], [x+30, y+10], [x-30, y+10]], value, .99)
                     for value, x in (("Accept", 440), ("Decline", 160))], None
         view = Recognizer(reader).inspect(Image.fromarray(frame))
         self.assertEqual(len(calls), 2)
-        self.assertLess(calls[1][0], calls[0][0])
+        self.assertLess(calls[0][0], calls[1][0])
         self.assertEqual(view.targets["accept"], (440, 950))
 
     def test_match_and_cancel_are_not_confused_with_matchmaking(self):
@@ -135,10 +134,12 @@ class VisionTests(unittest.TestCase):
             self.assertTrue(ready)
             self.assertEqual(len(likes), 3 - liked)
 
-    def test_missing_buttons_are_not_treated_as_finished_results(self):
+    def test_confirmed_results_without_white_thumbs_supply_only_exit(self):
         view = classify(self.frame, [self.title, text("Drops", 70, 760)])
         self.assertEqual(view.state, "results")
-        self.assertFalse(view.likes_ready)
+        self.assertTrue(view.likes_ready)
+        self.assertEqual(view.likes, [])
+        self.assertEqual(list(view.targets), ['return'])
 
     def test_dark_gold_liked_row_still_allows_exit_without_ocr(self):
         for liked in range(4):
@@ -155,6 +156,18 @@ class VisionTests(unittest.TestCase):
         view = Recognizer(forbidden_reader).inspect(Image.fromarray(results_image()))
         self.assertEqual(view.state, "results")
         self.assertEqual(len(view.likes), 3)
+        self.assertTrue(all(abs(x - 235) > 20 for x, _ in view.likes))
+
+    def test_four_actual_thumbs_are_supported_without_clicking_fixed_avatar_positions(self):
+        image = results_image()
+        image[690:740, 200:270] = (25, 52, 49)
+        cv2.rectangle(image, (213, 703), (257, 727), (225, 225, 225), -1)
+        cv2.circle(image, (213, 715), 12, (225, 225, 225), -1)
+        cv2.circle(image, (257, 715), 12, (225, 225, 225), -1)
+        cv2.rectangle(image, (227, 709), (243, 721), (20, 20, 20), -1)
+        view = results_fast(image)
+        self.assertEqual(len(view.likes), 4)
+        self.assertIn((235, 715), view.likes)
 
     def test_like_clicks_do_not_depend_on_exit_arrow_recognition(self):
         image = results_image()
@@ -163,7 +176,21 @@ class VisionTests(unittest.TestCase):
         self.assertEqual(view.state, "results")
         self.assertTrue(view.likes_ready)
         self.assertEqual(len(view.likes), 3)
-        self.assertNotIn("return", view.targets)
+        self.assertEqual(view.targets["return"], (66, 1050))
+
+    def test_rank_banner_and_divider_work_when_both_thumb_and_arrow_detectors_miss(self):
+        image = results_image()
+        image[650:750] = (25, 52, 49)
+        image[1000:] = (25, 52, 49)
+        image[180:280] = (205, 215, 100)
+        def forbidden_reader(*args, **kwargs):
+            self.fail("The results layout should be recognized without OCR")
+        view = Recognizer(forbidden_reader).inspect(Image.fromarray(image))
+        self.assertEqual(view.state, "results")
+        self.assertTrue(view.likes_ready)
+        self.assertEqual(view.likes, [])
+        self.assertEqual(list(view.targets), ['return'])
+        self.assertEqual(view.targets["return"], (66, 1050))
 
     def test_ocr_box_coordinates_are_translated_out_of_letterboxing(self):
         frame = np.zeros((1100, 1400, 3), dtype=np.uint8)

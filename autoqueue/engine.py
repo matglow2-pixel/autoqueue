@@ -29,21 +29,15 @@ class Engine:
         self.last_accept = float("-inf")
         self.pending = None
         self.results = False
-        self.results_seen = {}
         self.finished = set()
-        self.member_at = float("inf")
-        self.liked = {"leader": [], "member": []}
         self.next_click = 0.0
         self.runs = 0
         self.match_attempts = 0
         self.match_retry_at = 0.0
+        self.requeue_at = 0.0
 
     def step(self, views: dict[str, View], now: float) -> Action | None:
         for role, view in views.items():
-            if view.state == "results":
-                self.results_seen.setdefault(role, now)
-            else:
-                self.results_seen.pop(role, None)
             if view.state == "accept":
                 self.absent_since.pop(role, None)
             else:
@@ -60,7 +54,6 @@ class Engine:
             if self.results:
                 self.results = False
                 self.finished.clear()
-                self.liked = {"leader": [], "member": []}
             for role in ("leader", "member"):
                 if (views[role].state == "accept" and role not in self.accepted
                         and now - self.last_accept >= .5):
@@ -75,23 +68,15 @@ class Engine:
             expected = {
                 "dungeon": {"menu"},
                 "match": {"queue", "world", "results"},
-                "return": {"world", "menu", "queue"},
+                "cleanup": {"world", "menu", "queue"},
             }
-            if action.kind == "like":
-                done = view.state == "results" and self.likes_readable(action.role, view) and not any(
-                    self.near(action.point, p) for p in view.likes
-                )
-            else:
-                done = view.state in expected[action.kind]
+            done = view.state in expected[action.kind]
             if done:
                 self.pending = None
                 if action.kind == "match":
                     self.match_attempts = 0
-                if action.kind == "return":
+                if action.kind == "cleanup":
                     self.finished.add(action.role)
-                    if action.role == "leader":
-                        # Hand off only after the leader has actually returned.
-                        self.member_at = now
             elif action.kind == "match":
                 # An unreadable queue/transition is still a queue wait. There
                 # is no deadline for a match to be found. Only a positively
@@ -119,28 +104,19 @@ class Engine:
             if len(self.finished) == 2:
                 self.results = False
                 self.finished.clear()
-                self.liked = {"leader": [], "member": []}
                 self.runs += 1
                 return None
-            role = "member" if "leader" in self.finished else "leader"
-            if role == "member" and now < self.member_at:
-                return None
+            role = "leader" if "member" in self.finished else "member"
             view = views[role]
             if view.state != "results":
                 return None
-            if not self.likes_readable(role, view):
+            if not view.likes_ready:
                 return None
-            choices = [p for p in view.likes
-                       if not any(self.near(p, old) for old in self.liked[role])]
-            if choices:
-                if len(self.liked[role]) >= 3:
-                    raise SafetyStop("Unexpected extra like buttons found. Check the game screen.")
-                point = sorted(choices)[0]
-                self.liked[role].append(point)
-                return self.emit(Action(role, "like", point), now, timeout=4)
-            return self.emit(Action(role, "return"), now, timeout=25)
+            return self.emit(Action(role, "cleanup"), now, timeout=25)
 
         # Both must be back outside combat before a new queue can start.
+        if now < self.requeue_at:
+            return None
         if views["member"].state not in {"world", "queue"}:
             return None
         if views["leader"].state == "world":
@@ -153,15 +129,10 @@ class Engine:
     def near(a, b):
         return abs(a[0] - b[0]) < 20 and abs(a[1] - b[1]) < 20
 
-    def likes_readable(self, role, view):
-        # Some game versions remove liked buttons instead of recoloring them.
-        # A fully empty row is only completion after all three teammates were
-        # clicked, with the results arrow still positively detected.
-        return view.likes_ready or (len(self.liked[role]) == 3 and not view.likes
-                                    and "return" in view.targets)
-
     def emit(self, action, now, timeout=None):
         self.next_click = now
+        if action.kind == "cleanup" and action.role == "leader":
+            self.requeue_at = now + 5
         if action.kind == "match":
             self.pending = (action, None)
             self.match_attempts += 1
@@ -179,7 +150,7 @@ class Engine:
                 self.match_attempts = 0
                 self.match_retry_at = now + 2
             else:
-                timeout = {"dungeon": 10, "like": 4, "return": 25}[action.kind]
+                timeout = {"dungeon": 10, "cleanup": 25}[action.kind]
                 self.pending = (action, now + timeout)
 
     def rebase_after_pause(self, duration):
@@ -188,8 +159,7 @@ class Engine:
             action, deadline = self.pending
             self.pending = action, deadline + duration if deadline is not None else None
         self.next_click += duration
-        self.member_at += duration
         self.last_accept += duration
         self.match_retry_at += duration
+        self.requeue_at += duration
         self.absent_since = {r: t + duration for r, t in self.absent_since.items()}
-        self.results_seen = {r: t + duration for r, t in self.results_seen.items()}

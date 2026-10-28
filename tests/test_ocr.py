@@ -33,12 +33,14 @@ class OCRIntegrationTests(unittest.TestCase):
                     label('Explore', (420, 1050), 20)
                 else:
                     label('Demonseal Gorge - Hard', (50, 70), 28)
-                    draw.rounded_rectangle((310, 930, 575, 995), radius=24, fill=(205, 216, 75))
+                    draw.rounded_rectangle((30, 930, 285, 995), radius=24, fill=(225, 225, 225))
+                    draw.rounded_rectangle((310, 930, 575, 995), radius=24,
+                                           fill=(225, 225, 225) if state == 'queue' else (205, 216, 75))
                     if state == 'accept':
-                        label('Decline', (100, 950))
+                        label('Decline', (100, 950), fill='black')
                         label('Accept', (400, 950), fill='black')
                     else:
-                        label('Team 2/4', (90, 940))
+                        label('Team 2/4', (90, 940), fill='black')
                         label('Cancel' if state == 'queue' else 'Match', (400, 950), fill='black')
                 previous_calls = len(calls)
                 view = recognizer.inspect(image)

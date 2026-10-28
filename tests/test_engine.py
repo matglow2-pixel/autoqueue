@@ -50,27 +50,21 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(e.step(views("accept", "accept"), 2).role, "leader")
         self.assertEqual(e.step(views("accept", "accept"), 3).role, "member")
 
-    def test_results_handoff_immediately_after_confirmed_return(self):
+    def test_member_cleanup_then_leader_then_five_second_reload(self):
         e = Engine()
-        like = (100, 700)
-        both = views("results", "results", [like], [like])
-        self.assertIsNone(e.step(both, -2))
-        a = e.step(both, 0)
-        self.assertEqual((a.role, a.kind), ("leader", "like"))
-        self.assertIsNone(e.step(both, 1))  # A click must visibly change the button.
-        a = e.step(views("results", "results", [], [like]), 2)
-        self.assertEqual((a.role, a.kind), ("leader", "return"))
-        waiting = views("world", "results", [], [like])
-        a = e.step(waiting, 3)
-        self.assertEqual((a.role, a.kind), ("member", "like"))
-        a = e.step(views("world", "results"), 4)
-        self.assertEqual((a.role, a.kind), ("member", "return"))
-        self.assertIsNone(e.step(views(), 5))
+        a = e.step(views("results", "results"), 0)
+        self.assertEqual((a.role, a.kind), ("member", "cleanup"))
+        self.assertIsNone(e.step(views("results", "results"), .1))
+        a = e.step(views("results", "world"), 1)
+        self.assertEqual((a.role, a.kind), ("leader", "cleanup"))
+        self.assertIsNone(e.step(views(), 1.1))
         self.assertEqual(e.runs, 1)
-        self.assertEqual(e.step(views(), 5.02).kind, "dungeon")
+        self.assertIsNone(e.step(views(), 5.99))
+        self.assertEqual(e.step(views(), 6).kind, "dungeon")
 
-    def test_waits_for_leader_when_member_finishes_first(self):
-        self.assertIsNone(Engine().step(views("unknown", "results", [], [(100, 700)]), 0))
+    def test_member_starts_without_waiting_for_leaders_end_screen(self):
+        action = Engine().step(views("unknown", "results"), 0)
+        self.assertEqual((action.role, action.kind), ("member", "cleanup"))
 
     def test_stuck_click_pauses_instead_of_spamming(self):
         e = Engine()
@@ -78,13 +72,12 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(SafetyStop):
             e.step(views(), 10)
 
-    def test_failed_like_does_not_blindly_leave(self):
+    def test_exit_confirmation_still_detects_an_account_that_did_not_leave(self):
         e = Engine()
-        v = views("results", "results", [(100, 700)])
-        e.step(v, -2)
+        v = views("results", "results")
         e.step(v, 0)
         with self.assertRaises(SafetyStop):
-            e.step(v, 4)
+            e.step(v, 25)
 
     def test_pause_preserves_pending_deadline(self):
         e = Engine()
@@ -100,23 +93,20 @@ class EngineTests(unittest.TestCase):
             self.assertIsNone(e.step(views("unknown", "unknown"), t))
         self.assertIsNone(e.step(views("world", "unknown"), 1001))
 
-    def test_three_likes_before_return(self):
+    def test_no_individual_thumb_confirmation_between_row_taps(self):
         e = Engine()
-        likes = [(100, 700), (300, 700), (500, 700)]
-        e.step(views("results", "results", likes), -2)
-        for t in range(3):
-            action = e.step(views("results", "results", likes), t)
-            self.assertEqual(action.kind, "like")
-            likes.remove(action.point)
-        self.assertEqual(e.step(views("results", "results"), 3).kind, "return")
+        both = views("results", "results", [(100, 700)], [(300, 700)])
+        self.assertEqual(e.step(both, 0).kind, "cleanup")
+        self.assertIsNone(e.step(both, .1))
+        self.assertEqual(e.step(views("results", "world", [(100, 700)]), .2).role, "leader")
 
     def test_results_wait_only_until_buttons_are_readable(self):
         e = Engine()
         unreadable = views("results", "results")
-        unreadable["leader"].likes_ready = False
+        unreadable["member"].likes_ready = False
         self.assertIsNone(e.step(unreadable, 0))
         action = e.step(views("results", "results", [(100, 700)]), .02)
-        self.assertEqual(action.kind, "like")
+        self.assertEqual(action.kind, "cleanup")
 
     def test_match_click_has_no_fixed_delay_after_dungeon_opens(self):
         e = Engine()
@@ -170,21 +160,14 @@ class EngineTests(unittest.TestCase):
     def test_missing_like_detection_does_not_exit_fresh_results(self):
         e = Engine()
         v = views("results", "results")
-        v["leader"].likes_ready = False
+        v["member"].likes_ready = False
         self.assertIsNone(e.step(v, 0))
         self.assertIsNone(e.step(v, 5))
 
-    def test_can_exit_after_all_three_like_buttons_disappear(self):
+    def test_results_layout_is_sufficient_even_when_individual_icons_are_missing(self):
         e = Engine()
-        likes = [(100, 700), (300, 700), (500, 700)]
-        e.step(views("results", "results", likes), -2)
-        for t in range(3):
-            action = e.step(views("results", "results", likes), t)
-            likes.remove(action.point)
         v = views("results", "results")
-        v["leader"].likes_ready = False
-        v["leader"].targets["return"] = (70, 1050)
-        self.assertEqual(e.step(v, 3).kind, "return")
+        self.assertEqual(e.step(v, 0).kind, "cleanup")
 
 
 if __name__ == "__main__":
