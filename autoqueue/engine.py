@@ -56,7 +56,7 @@ class Engine:
                 self.finished.clear()
             for role in ("leader", "member"):
                 if (views[role].state == "accept" and role not in self.accepted
-                        and now - self.last_accept >= .5):
+                        and now - self.last_accept >= 1.5):
                     self.accepted.add(role)
                     self.last_accept = now
                     return self.emit(Action(role, "accept"), now)

@@ -18,37 +18,38 @@ class EngineTests(unittest.TestCase):
         self.assertEqual((a.role, a.kind), ("leader", "match"))
         self.assertIsNone(e.step(views("queue", "queue"), 3))
 
-    def test_accepts_half_a_second_apart_and_does_not_repeat(self):
+    def test_accepts_one_and_a_half_seconds_apart_and_does_not_repeat(self):
         e = Engine()
         a = e.step(views("accept", "accept"), 0)
         self.assertEqual(a.role, "leader")
-        self.assertIsNone(e.step(views("accept", "accept"), .49))
-        a = e.step(views("accept", "accept"), .5)
+        self.assertIsNone(e.step(views("accept", "accept"), 1.49))
+        a = e.step(views("accept", "accept"), 1.5)
         self.assertEqual(a.role, "member")
         self.assertIsNone(e.step(views("accept", "accept"), 5))
 
     def test_declined_match_rearms_accepts_after_prompt_disappears(self):
         e = Engine()
         e.step(views("accept", "accept"), 0)
-        e.step(views("accept", "accept"), 1)
+        e.step(views("accept", "accept"), 1.5)
         e.step(views("queue", "queue"), 2)
         e.step(views("queue", "queue"), 5)
         self.assertEqual(e.step(views("accept", "accept"), 6).role, "leader")
-        self.assertEqual(e.step(views("accept", "accept"), 7).role, "member")
+        self.assertEqual(e.step(views("accept", "accept"), 7.5).role, "member")
 
     def test_no_rapid_reclick_for_transient_prompt_loss(self):
         e = Engine()
         e.step(views("accept", "accept"), 0)
-        e.step(views("unknown", "accept"), 1)
+        e.step(views("unknown", "accept"), 1.5)
         self.assertIsNone(e.step(views("accept", "accept"), 2))
 
     def test_fast_decline_and_rematch_rearms_on_confirmed_queue(self):
         e = Engine()
         e.step(views("accept", "accept"), 0)
-        e.step(views("accept", "accept"), 1)
-        e.step(views("queue", "queue"), 1.2)
-        self.assertEqual(e.step(views("accept", "accept"), 2).role, "leader")
-        self.assertEqual(e.step(views("accept", "accept"), 3).role, "member")
+        e.step(views("accept", "accept"), 1.5)
+        e.step(views("queue", "queue"), 1.7)
+        self.assertIsNone(e.step(views("accept", "accept"), 2))
+        self.assertEqual(e.step(views("accept", "accept"), 3).role, "leader")
+        self.assertEqual(e.step(views("accept", "accept"), 4.5).role, "member")
 
     def test_member_cleanup_then_leader_then_five_second_reload(self):
         e = Engine()
@@ -120,8 +121,8 @@ class EngineTests(unittest.TestCase):
         for now in (15, 30, 60, 120, 3600):
             self.assertIsNone(e.step(views("unknown", "unknown"), now))
         self.assertEqual(e.step(views("accept", "accept"), 3601).role, "leader")
-        self.assertIsNone(e.step(views("accept", "accept"), 3601.49))
-        self.assertEqual(e.step(views("accept", "accept"), 3601.5).role, "member")
+        self.assertIsNone(e.step(views("accept", "accept"), 3602.49))
+        self.assertEqual(e.step(views("accept", "accept"), 3602.5).role, "member")
 
     def test_confirmed_queue_has_no_wait_limit(self):
         e = Engine()
@@ -135,7 +136,7 @@ class EngineTests(unittest.TestCase):
         e.step(views(), 0)
         self.assertEqual(e.step(views("accept", "accept"), 30).role, "leader")
         self.assertIsNone(e.pending)
-        self.assertEqual(e.step(views("accept", "accept"), 30.5).role, "member")
+        self.assertEqual(e.step(views("accept", "accept"), 31.5).role, "member")
 
     def test_match_retries_require_the_actual_menu_to_remain_visible(self):
         e = Engine()

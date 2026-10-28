@@ -1,4 +1,4 @@
-# Sword x Staff Autoqueue — OCR 1.4
+# Sword x Staff Autoqueue — OCR 1.5
 
 **Choose Leader, choose Member, press Start. No calibration.**
 
@@ -38,7 +38,7 @@ using the PC for something else. No ADB is required.
 ## What happens
 
 1. Only the leader opens the dungeon entrance and presses **Match**.
-2. Both accounts press **Accept**, at least **0.5 seconds apart**. A declined match
+2. Both accounts press **Accept**, at least **1.5 seconds apart**. A declined match
    returns to waiting for the next prompt. **Matchmaking has no timeout**: queues
    lasting a minute or longer keep running, including when queue OCR is unreadable.
 3. Combat runs using the game's automatic combat; this program does not control it.
@@ -118,7 +118,7 @@ Match/Accept text in chat. Screenshots are processed locally and not uploaded.
 python -m unittest discover -s tests -v
 ```
 
-Tests cover queue/accept sequencing, half-second acceptance spacing, rapid rematches,
+Tests cover queue/accept sequencing, 1.5-second acceptance spacing, rapid rematches,
 actual thumb-button detection, member-first cleanup, the five-second reload delay, pause timing,
 results-button detection at different sizes, already-liked icons, letterboxing,
 low-confidence/context rejection and stopping during a blocked OCR read.
