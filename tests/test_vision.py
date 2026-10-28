@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from autoqueue.vision import Recognizer, Text, classify, find_likes, find_return
+from autoqueue.vision import Recognizer, Text, classify, find_likes, find_return, results_fast
 
 
 def text(value, x, y, confidence=.99):
@@ -17,6 +17,13 @@ def results_image(scale=1, liked=0):
         cv2.rectangle(image, (x - 22, 703), (x + 22, 727), (225, 225, 225), -1)
         cv2.circle(image, (x - 22, 715), 12, (225, 225, 225), -1)
         cv2.circle(image, (x + 22, 715), 12, (225, 225, 225), -1)
+        if i < liked:
+            cv2.rectangle(image, (x - 22, 703), (x + 22, 727), (90, 95, 45), -1)
+            cv2.circle(image, (x - 22, 715), 12, (90, 95, 45), -1)
+            cv2.circle(image, (x + 22, 715), 12, (90, 95, 45), -1)
+            cv2.rectangle(image, (x - 22, 705), (x + 22, 725), (25, 40, 38), -1)
+            cv2.circle(image, (x - 22, 715), 10, (25, 40, 38), -1)
+            cv2.circle(image, (x + 22, 715), 10, (25, 40, 38), -1)
         color = (245, 190, 25) if i < liked else (20, 20, 20)
         cv2.rectangle(image, (x - 8, 709), (x + 8, 721), color, -1)
         cv2.rectangle(image, (x - 4, 705), (x + 2, 713), color, -1)
@@ -24,6 +31,10 @@ def results_image(scale=1, liked=0):
     cv2.fillPoly(image, [arrow], (240, 240, 240))
     # Bright chest-shaped artwork should not be treated as a like button.
     cv2.rectangle(image, (60, 540), (140, 600), (245, 210, 80), -1)
+    cv2.line(image, (20, 780), (580, 780), (170, 170, 170), 2)
+    # The player's own like counter is a gold hexagon, not a teammate button.
+    cv2.fillPoly(image, [np.array([(235, 698), (250, 706), (250, 724), (235, 732),
+                                  (220, 724), (220, 706)])], (190, 200, 70))
     if scale != 1:
         image = cv2.resize(image, None, fx=scale, fy=scale)
     return image
@@ -73,6 +84,19 @@ class VisionTests(unittest.TestCase):
                 self.assertIsNotNone(point)
                 self.assertLess(abs(point[0] / scale - 74), 3)
 
+    def test_exit_detection_accepts_different_chevron_stroke_widths(self):
+        for stroke in (5, 7, 9, 12):
+            with self.subTest(stroke=stroke):
+                image = np.full((1100, 600, 3), (25, 52, 49), dtype=np.uint8)
+                cv2.polylines(image, [np.array([(82, 1032), (64, 1050), (82, 1068)])],
+                              False, (240, 240, 240), stroke, cv2.LINE_AA)
+                self.assertIsNotNone(find_return(image))
+
+    def test_results_detection_rejects_white_circle_in_exit_corner(self):
+        image = np.full((1100, 600, 3), (25, 52, 49), dtype=np.uint8)
+        cv2.circle(image, (75, 1050), 20, (240, 240, 240), -1)
+        self.assertIsNone(find_return(image))
+
     def test_clicked_gold_thumbs_are_not_liked_twice(self):
         for liked in range(4):
             likes, ready = find_likes(results_image(liked=liked), 760)
@@ -83,6 +107,31 @@ class VisionTests(unittest.TestCase):
         view = classify(self.frame, [self.title, text("Drops", 70, 760)])
         self.assertEqual(view.state, "results")
         self.assertFalse(view.likes_ready)
+
+    def test_dark_gold_liked_row_still_allows_exit_without_ocr(self):
+        for liked in range(4):
+            with self.subTest(liked=liked):
+                view = results_fast(results_image(liked=liked))
+                self.assertIsNotNone(view)
+                self.assertTrue(view.likes_ready)
+                self.assertEqual(len(view.likes), 3 - liked)
+                self.assertIn("return", view.targets)
+
+    def test_results_icons_use_no_ocr_and_no_manual_templates(self):
+        def forbidden_reader(*args, **kwargs):
+            self.fail("Results icons should not run a full-window OCR pass")
+        view = Recognizer(forbidden_reader).inspect(Image.fromarray(results_image()))
+        self.assertEqual(view.state, "results")
+        self.assertEqual(len(view.likes), 3)
+
+    def test_like_clicks_do_not_depend_on_exit_arrow_recognition(self):
+        image = results_image()
+        image[1000:] = (25, 52, 49)
+        view = classify(image, [self.title, text("Drops", 70, 760)])
+        self.assertEqual(view.state, "results")
+        self.assertTrue(view.likes_ready)
+        self.assertEqual(len(view.likes), 3)
+        self.assertNotIn("return", view.targets)
 
     def test_ocr_box_coordinates_are_translated_out_of_letterboxing(self):
         frame = np.zeros((1100, 1400, 3), dtype=np.uint8)

@@ -63,9 +63,18 @@ class Runner(threading.Thread):
         if role in self.sizes and size != self.sizes[role]:
             raise SafetyStop("Window resized. Stop and Start to use its new size.")
         self.sizes[role] = size
-        return self.recognizer.inspect(image)
+        return self.recognizer.inspect(image, role=role)
 
     def run(self):
+        try:
+            self.work()
+        finally:
+            for window in self.targets.values():
+                close = getattr(window, "close_capture", None)
+                if close:
+                    close()
+
+    def work(self):
         self.send("log", "Loading the built-in OCR engine...")
         try:
             self.recognizer = self.recognizer_factory()
@@ -113,7 +122,7 @@ class Runner(threading.Thread):
                         if sent is False:
                             continue
                         clicked_at = self.control.now()
-                        planned.next_click = clicked_at + .6
+                        planned.next_click = clicked_at
                         if action.kind == "accept":
                             planned.last_accept = clicked_at
                         if planned.pending:
@@ -125,7 +134,7 @@ class Runner(threading.Thread):
                 if not self.control.stopped.is_set():
                     self.control.pause()
                     self.send("paused", str(error))
-            self.control.stopped.wait(.15)
+            self.control.stopped.wait(.02)
 
 
 def action_point(action, view, all_liked=False):

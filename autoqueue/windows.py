@@ -3,9 +3,9 @@ import ctypes as C
 import queue
 import threading
 from ctypes import wintypes as W
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from PIL import ImageGrab
+from PIL import Image
 
 from .engine import SafetyStop
 from .focus import activate
@@ -117,6 +117,7 @@ def enable_dpi_awareness():
 class Window:
     handle: int
     title: str
+    capture_local: threading.local = field(default_factory=threading.local, init=False, repr=False, compare=False)
 
     def rect(self):
         if not user32.IsWindow(self.handle) or user32.IsIconic(self.handle):
@@ -138,10 +139,22 @@ class Window:
 
     def capture(self):
         x, y, w, h = self.require_visible()
-        image = ImageGrab.grab(bbox=(x, y, x + w, y + h), all_screens=True).convert("RGB")
+        # Grab only this client rectangle; ImageGrab first copied the entire
+        # desktop for each account. Keep each capture session on its worker.
+        if not hasattr(self.capture_local, "session"):
+            from mss import mss
+            self.capture_local.session = mss()
+        shot = self.capture_local.session.grab({"left": x, "top": y, "width": w, "height": h})
+        image = Image.frombytes("RGB", (w, h), shot.bgra, "raw", "BGRX")
         if self.rect() != (x, y, w, h):
             raise SafetyStop("Window moved during a screen read. Resume once it is in place.")
         return image
+
+    def close_capture(self):
+        session = getattr(self.capture_local, "session", None)
+        if session is not None:
+            del self.capture_local.session
+            session.close()
 
     def focus(self, allowed=lambda: True):
         self.require_visible()

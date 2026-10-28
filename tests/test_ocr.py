@@ -16,6 +16,12 @@ class OCRIntegrationTests(unittest.TestCase):
         if font_path is None:
             self.skipTest('No supported system font available for generated fixtures')
         recognizer = Recognizer()
+        model = recognizer.reader
+        calls = []
+        def counted_reader(*args, **kwargs):
+            calls.append(1)
+            return model(*args, **kwargs)
+        recognizer.reader = counted_reader
         for state in ('menu', 'accept', 'queue', 'world'):
             with self.subTest(state=state):
                 image = Image.new('RGB', (600, 1100), (28, 53, 48))
@@ -34,11 +40,19 @@ class OCRIntegrationTests(unittest.TestCase):
                     else:
                         label('Team 2/4', (90, 940))
                         label('Cancel' if state == 'queue' else 'Match', (400, 950), fill='black')
+                previous_calls = len(calls)
                 view = recognizer.inspect(image)
+                self.assertEqual(len(calls), previous_calls + 1)
                 self.assertEqual(view.state, state)
                 if state in ('menu', 'accept'):
                     x, y = view.targets['match' if state == 'menu' else 'accept']
                     self.assertTrue(310 < x < 575 and 930 < y < 995)
+                # Fresh screenshots with unchanged UI labels should validate
+                # the automatic anchors, without repeating model inference.
+                for _ in range(10):
+                    fresh = recognizer.inspect(image.copy())
+                    self.assertEqual(fresh.state, state)
+                self.assertEqual(len(calls), previous_calls + 1)
 
 
 if __name__ == '__main__':

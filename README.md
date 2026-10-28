@@ -1,4 +1,4 @@
-# Sword x Staff Autoqueue — OCR 1.1
+# Sword x Staff Autoqueue — OCR 1.2
 
 **Choose Leader, choose Member, press Start. No calibration.**
 
@@ -38,17 +38,29 @@ using the PC for something else. No ADB is required.
 ## What happens
 
 1. Only the leader opens the dungeon entrance and presses **Match**.
-2. Both accounts press **Accept**, at least **one second apart**. A declined match
+2. Both accounts press **Accept**, at least **0.5 seconds apart**. A declined match
    returns to waiting for the next prompt.
 3. Combat runs using the game's automatic combat; this program does not control it.
 4. Once results finish appearing, the leader likes all detected available teammates
    and presses the **bottom-left exit arrow**.
-5. When the leader is visibly outside, the program waits **two seconds**, then the
-   member likes teammates and exits.
+5. When the leader is visibly outside, the member immediately starts liking
+   teammates and exits. There is no additional handoff delay.
 6. Both must be outside before the leader opens the dungeon again. Runs continue
    until stopped, including after daily reward attempts are exhausted.
 
 OCR runs in the background so the control window and stop key remain responsive.
+Dungeon, Match, likes and exit have no deliberate per-button cooldown. The loop
+checks again after 20 milliseconds plus screen capture/processing time. After OCR
+first locates the labels, fresh screenshots validate small label patches instead
+of repeatedly running full-window OCR. A changed label triggers OCR again. These
+temporary anchors are automatic and kept in memory; no calibration is needed.
+Screen capture copies only each game rectangle through MSS, rather than copying
+the entire desktop separately for each game. Run setup again to install MSS.
+Results use the Drops divider, white unclicked thumbs, dark/gold already-liked
+thumbs and normalized exit-arrow silhouettes directly. Missing exit detection no
+longer prevents liking teammates. The program waits for each click's visible
+effect before the next dependent action, rather than sending a blind click burst.
+Actual response time depends on your PC and BlueStacks updating its screen.
 When switching accounts, the app temporarily shares Windows input queues to
 request focus and waits for activation. If Windows still denies the request,
 it can click the visible BlueStacks title bar to activate that window. It then
@@ -89,11 +101,13 @@ Match/Accept text in chat. Screenshots are processed locally and not uploaded.
 python -m unittest discover -s tests -v
 ```
 
-Tests cover queue/accept sequencing, one-second acceptance spacing, rapid rematches,
-three teammate likes, exit ordering, the two-second handoff, pause timing,
+Tests cover queue/accept sequencing, half-second acceptance spacing, rapid rematches,
+three teammate likes, exit ordering, immediate results handoff, pause timing,
 results-button detection at different sizes, already-liked icons, letterboxing,
 low-confidence/context rejection and stopping during a blocked OCR read.
 An integration test runs the actual bundled OCR models on generated button screens.
+It verifies that repeated unchanged screens reuse automatically read labels
+without additional OCR inference, and that changed screens invalidate those labels.
 Focus regressions cover delayed activation, denied requests, title-bar fallback,
 attachment cleanup, cancellation and retrying an unsent click after focus changes.
 Those fixtures are not live game captures; passing them does not establish live

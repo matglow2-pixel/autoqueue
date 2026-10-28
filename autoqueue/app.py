@@ -19,7 +19,7 @@ class App:
         self.windows = []
         self.selectors = {}
         self.hotkeys = Hotkeys()
-        root.title("Sword x Staff Autoqueue — OCR 1.1")
+        root.title("Sword x Staff Autoqueue — OCR 1.2")
         root.geometry("760x440")
         ttk.Label(root, text="Sword x Staff Autoqueue", font=("Segoe UI", 17)).pack(pady=12)
         ttk.Label(root, text="Select the two game windows, then Start. Buttons are detected automatically.").pack()
@@ -121,7 +121,7 @@ class App:
         for selector in self.selectors.values():
             selector.configure(state="disabled")
         self.status.configure(text="Running. F8 pauses; F9 stops.")
-        self.write("Started. One second between accepts; two seconds between results cleanup.")
+        self.write("Started. Accepts 0.5 seconds apart; other buttons clicked as soon as detected.")
 
     def stop(self):
         self.start_pending = False

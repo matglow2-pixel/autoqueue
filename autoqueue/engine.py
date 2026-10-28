@@ -69,8 +69,8 @@ class Engine:
                 if action.kind == "return":
                     self.finished.add(action.role)
                     if action.role == "leader":
-                        # Delay begins after the leader has actually returned.
-                        self.member_at = now + 2
+                        # Hand off only after the leader has actually returned.
+                        self.member_at = now
             elif now >= deadline:
                 raise SafetyStop(
                     f"{action.role}: could not confirm {action.kind}. "
@@ -85,7 +85,7 @@ class Engine:
         # Prompt detection always wins over opening another menu.
         for role in ("leader", "member"):
             if (views[role].state == "accept" and role not in self.accepted
-                    and now - self.last_accept >= 1):
+                    and now - self.last_accept >= .5):
                 self.accepted.add(role)
                 self.last_accept = now
                 return self.emit(Action(role, "accept"), now)
@@ -108,9 +108,6 @@ class Engine:
                 return None
             view = views[role]
             if view.state != "results":
-                return None
-            # Let avatars/buttons finish appearing before counting zero likes.
-            if now - self.results_seen[role] < 2:
                 return None
             if not self.likes_readable(role, view):
                 return None
@@ -145,7 +142,7 @@ class Engine:
                                     and "return" in view.targets)
 
     def emit(self, action, now, timeout=None):
-        self.next_click = now + 0.6
+        self.next_click = now
         if timeout:
             self.pending = (action, now + timeout)
         return action

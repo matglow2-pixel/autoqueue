@@ -28,7 +28,7 @@ class RunnerTests(unittest.TestCase):
     def test_lost_focus_does_not_commit_an_unsent_game_click(self):
         order = []
         class WorldOCR:
-            def inspect(self, image):
+            def inspect(self, image, role="default"):
                 order.append('read')
                 return View('world', targets={'dungeon': (300, 380)})
         class FocusWindow(FakeWindow):
@@ -59,7 +59,7 @@ class RunnerTests(unittest.TestCase):
     def test_stop_during_slow_ocr_cancels_planned_mouse_input(self):
         entered, release = threading.Event(), threading.Event()
         class SlowOCR:
-            def inspect(self, image):
+            def inspect(self, image, role="default"):
                 entered.set()
                 if not release.wait(2):
                     raise RuntimeError('Test OCR timed out')

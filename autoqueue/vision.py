@@ -1,6 +1,7 @@
 """Offline OCR for labels; automatic geometry for the unlabelled game icons."""
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
+import time
 
 import cv2
 import numpy as np
@@ -32,12 +33,24 @@ class Recognizer:
             reader = RapidOCR(intra_op_num_threads=2, inter_op_num_threads=1,
                               det_limit_side_len=960, det_limit_type="max")
         self.reader = reader
+        self.cache = {}
 
-    def inspect(self, image):
+    def inspect(self, image, role="default"):
         full = np.asarray(image.convert("RGB"))
         frame, offset = game_frame(full)
         if frame is None:
             return View(detail="Use portrait game windows, both fully visible.")
+        # Results icons have no text. Detect the divider and button row directly
+        # on each fresh frame, including the dark/gold already-liked state.
+        result_view = results_fast(frame)
+        if result_view is not None:
+            self.cache.pop(role, None)
+            return translate(result_view, offset)
+        cached = self.cache.get(role)
+        if cached and cached[0] == frame.shape and time.monotonic() - cached[1] < 10:
+            _, _, view, anchors = cached
+            if all(anchor_matches(frame, box, patch) for box, patch in anchors):
+                return translate(view, offset)
         # RapidOCR's numpy input uses OpenCV's BGR channel order.
         result, _ = self.reader(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), use_cls=False)
         texts = []
@@ -46,10 +59,58 @@ class Recognizer:
             box = (*points.min(axis=0).astype(int), *points.max(axis=0).astype(int))
             texts.append(Text(value, tuple(map(int, box)), float(confidence)))
         view = classify(frame, texts)
-        dx, dy = offset
-        view.targets = {name: (x + dx, y + dy) for name, (x, y) in view.targets.items()}
-        view.likes = [(x + dx, y + dy) for x, y in view.likes]
-        return view
+        self.cache.pop(role, None)
+        if view.state in {"world", "menu", "queue", "accept"}:
+            anchors = cache_anchors(frame, view.state, texts)
+            if len(anchors) >= 2:
+                self.cache[role] = (frame.shape, time.monotonic(), view, anchors)
+        return translate(view, offset)
+
+
+def translate(view, offset):
+    dx, dy = offset
+    return replace(view, targets={k: (x + dx, y + dy) for k, (x, y) in view.targets.items()},
+                   likes=[(x + dx, y + dy) for x, y in view.likes])
+
+
+def cache_anchors(frame, state, texts):
+    """Keep only automatically read UI labels, never animated game artwork."""
+    keys = {"world": ("demonsea", "explore"), "menu": ("match", "team"),
+            "queue": ("cancel", "team", "matchmaking", "demonsea"),
+            "accept": ("accept", "decline")}[state]
+    h, w = frame.shape[:2]
+    anchors = []
+    for text in texts:
+        if text.confidence < .65 or not any(k in text.key for k in keys):
+            continue
+        # Mirror the spatial guards used for OCR scene classification.
+        x, y = text.center
+        valid = (("demonsea" in text.key and y < .36 * h)
+                 or ("explore" in text.key and y > .85 * h)
+                 or ("matchmaking" in text.key and x < .35 * w and y < .5 * h)
+                 or (text.key in {"match", "cancel", "accept", "decline"} and y > .65 * h)
+                 or ("team" in text.key and x < .6 * w and y > .65 * h))
+        if not valid:
+            continue
+        x1, y1, x2, y2 = text.box
+        box = (max(0, x1 - 2), max(0, y1 - 2), min(w, x2 + 2), min(h, y2 + 2))
+        a, b, c, d = box
+        if c > a and d > b:
+            anchors.append((box, frame[b:d, a:c].copy()))
+    return anchors
+
+
+def anchor_matches(frame, box, template):
+    x1, y1, x2, y2 = box
+    patch = frame[y1:y2, x1:x2]
+    if patch.shape != template.shape:
+        return False
+    gray = cv2.cvtColor(patch, cv2.COLOR_RGB2GRAY)
+    ref = cv2.cvtColor(template, cv2.COLOR_RGB2GRAY)
+    if float(ref.std()) < 8:
+        return False  # A blank patch is not a recognizable label.
+    score = cv2.matchTemplate(gray, ref, cv2.TM_CCOEFF_NORMED)[0, 0]
+    return score > .92 and np.abs(patch.astype(np.int16) - template.astype(np.int16)).mean() < 24
 
 
 def game_frame(frame):
@@ -92,9 +153,7 @@ def classify(frame, texts):
     if title and drops:
         likes, ready = find_likes(frame, drops.box[1])
         arrow = find_return(frame)
-        return View("results", likes, {"return": arrow} if arrow else {},
-                    ready and arrow is not None,
-                    "" if ready and arrow else "Waiting for results buttons and return arrow.")
+        return results_view(likes, ready, arrow)
     if title and cancel and team:
         return View("queue")
     if title and match and team:
@@ -110,31 +169,38 @@ def classify(frame, texts):
     return View(detail="Waiting for the next game screen (combat/loading is normal).")
 
 
-def find_likes(frame, drops_y):
-    """Find bright pill-shaped buttons just above Drops, then inspect icon color."""
+def find_likes(frame, drops_y, min_buttons=1):
+    """Read both white unclicked pills and dark pills with gold thumbs/borders."""
     h, w = frame.shape[:2]
     top, bottom = max(0, int(drops_y - .15 * h)), max(0, int(drops_y - .008 * h))
     if bottom <= top:
         return [], False
     area = frame[top:bottom]
     hsv = cv2.cvtColor(area, cv2.COLOR_RGB2HSV)
-    mask = (hsv[:, :, 2] > 165).astype(np.uint8) * 255
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    white = (hsv[:, :, 1] < 65) & (hsv[:, :, 2] > 165)
+    gold = (hsv[:, :, 0] >= 15) & (hsv[:, :, 0] <= 55) & (hsv[:, :, 1] > 40) & (hsv[:, :, 2] > 60)
     buttons = []
-    for contour in contours:
-        x, y, bw, bh = cv2.boundingRect(contour)
-        if not (.065 * w <= bw <= .17 * w and .012 * h <= bh <= .045 * h
-                and 1.7 < bw / bh < 3.8 and cv2.contourArea(contour) / (bw * bh) > .65):
-            continue
-        icon = hsv[y + bh // 5:y + 4 * bh // 5, x + bw // 4:x + 3 * bw // 4]
-        if not icon.size:
-            continue
-        dark = float(np.mean(icon[:, :, 2] < 125))
-        colored = float(np.mean((icon[:, :, 1] > 80) & (icon[:, :, 2] > 125)))
-        if dark < .02 and colored < .04:
-            continue
-        buttons.append(((x + bw // 2, top + y + bh // 2), colored < .08 and dark > .02))
-    if not 1 <= len(buttons) <= 3:
+    kernel = np.ones((3, 3), np.uint8)
+    for mask, is_white in ((white, True), (gold, False)):
+        binary = cv2.morphologyEx(mask.astype(np.uint8) * 255, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            x, y, bw, bh = cv2.boundingRect(contour)
+            if not (.065 * w <= bw <= .17 * w and .012 * h <= bh <= .045 * h
+                    and 1.7 < bw / bh < 3.8 and cv2.contourArea(contour) / (bw * bh) > .60):
+                continue
+            icon = hsv[y + bh // 5:y + 4 * bh // 5, x + bw // 4:x + 3 * bw // 4]
+            if not icon.size:
+                continue
+            dark = float(np.mean(icon[:, :, 2] < 125))
+            colored = float(np.mean((icon[:, :, 1] > 80) & (icon[:, :, 2] > 125)))
+            if dark < .02 and colored < .04:
+                continue
+            point = (x + bw // 2, top + y + bh // 2)
+            if any(abs(point[0] - p[0]) < .035 * w and abs(point[1] - p[1]) < .015 * h for p, _ in buttons):
+                continue
+            buttons.append((point, is_white and colored < .08 and dark > .02))
+    if not min_buttons <= len(buttons) <= 3:
         return [], False
     if max(p[0][1] for p in buttons) - min(p[0][1] for p in buttons) > .018 * h:
         return [], False
@@ -148,12 +214,53 @@ def find_return(frame):
     hsv = cv2.cvtColor(frame[top:, :right], cv2.COLOR_RGB2HSV)
     mask = ((hsv[:, :, 1] < 60) & (hsv[:, :, 2] > 185)).astype(np.uint8) * 255
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    reference = np.array([(20, 0), (0, 20), (20, 40), (27, 33), (14, 20), (27, 7)], np.int32)
     hits = []
     for contour in contours:
         x, y, bw, bh = cv2.boundingRect(contour)
-        if not (.02 * w < bw < .1 * w and .02 * h < bh < .065 * h and .35 < bw / bh < 1.1):
+        if not (.015 * w < bw < .1 * w and .016 * h < bh < .065 * h and .3 < bw / bh < 1.1):
             continue
-        if cv2.matchShapes(contour, reference, cv2.CONTOURS_MATCH_I1, 0) < .3:
+        component = np.zeros((bh, bw), np.uint8)
+        cv2.drawContours(component, [contour - (x, y)], -1, 255, -1)
+        if is_left_chevron(component):
             hits.append((x + bw // 2, top + y + bh // 2))
     return hits[0] if len(hits) == 1 else None
+
+
+def is_left_chevron(component):
+    """Compare normalized silhouettes, allowing different arrow stroke widths."""
+    sample = cv2.resize(component, (32, 48), interpolation=cv2.INTER_AREA) > 100
+    for inner in (.35, .5, .65):
+        reference = np.zeros((48, 32), np.uint8)
+        points = np.array([(22, 0), (0, 24), (22, 47), (31, 38),
+                           (round(inner * 31), 24), (31, 9)], np.int32)
+        cv2.fillPoly(reference, [points], 1)
+        ref = reference.astype(bool)
+        overlap = np.logical_and(sample, ref).sum() / np.logical_or(sample, ref).sum()
+        if overlap > .60:
+            return True
+    return False
+
+
+def results_view(likes, ready, arrow):
+    detail = (f"{len(likes)} unclicked likes" if ready else "Waiting for like buttons")
+    detail += "; exit found" if arrow else "; waiting for exit arrow"
+    # Like detection does not depend on successful exit-arrow detection.
+    return View("results", likes, {"return": arrow} if arrow else {}, ready, detail)
+
+
+def results_fast(frame):
+    """The long Drops divider plus a row of thumbs identifies the end screen."""
+    h, w = frame.shape[:2]
+    top, bottom = int(.55 * h), int(.84 * h)
+    hsv = cv2.cvtColor(frame[top:bottom], cv2.COLOR_RGB2HSV)
+    mask = ((hsv[:, :, 1] < 70) & (hsv[:, :, 2] > 100)).astype(np.uint8) * 255
+    lines = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((1, max(1, int(.65 * w))), np.uint8))
+    contours, _ = cv2.findContours(lines, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for contour in contours:
+        _, y, bw, bh = cv2.boundingRect(contour)
+        if bw < .7 * w or bh > .008 * h:
+            continue
+        likes, ready = find_likes(frame, top + y - int(.02 * h), min_buttons=2)
+        if ready:
+            return results_view(likes, True, find_return(frame))
+    return None
