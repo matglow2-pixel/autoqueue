@@ -25,6 +25,28 @@ class FakeWindow:
 
 
 class RunnerTests(unittest.TestCase):
+    def test_match_click_commits_without_a_matchmaking_deadline(self):
+        class MenuOCR:
+            def inspect(self, image, role="default"):
+                return View('menu', targets={'match': (450, 950)}) if role == 'leader' else View('world')
+        class MatchWindow(FakeWindow):
+            def click(self, point, **kwargs):
+                self.clicks.append(point)
+                runner.control.stop()
+                return True
+        windows = {'leader': MatchWindow(), 'member': FakeWindow()}
+        runner = Runner(windows, queue.SimpleQueue(), recognizer_factory=MenuOCR)
+        runner.start()
+        runner.join(3)
+        try:
+            self.assertFalse(runner.is_alive())
+            self.assertEqual(windows['leader'].clicks, [(450, 950)])
+            self.assertEqual(runner.engine.pending[0].kind, 'match')
+            self.assertIsNone(runner.engine.pending[1])
+        finally:
+            runner.control.stop()
+            runner.join(2)
+
     def test_lost_focus_does_not_commit_an_unsent_game_click(self):
         order = []
         class WorldOCR:

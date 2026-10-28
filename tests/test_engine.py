@@ -123,6 +123,50 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(e.step(views(), 0).kind, "dungeon")
         self.assertEqual(e.step(views("menu"), .02).kind, "match")
 
+    def test_unreadable_queue_has_no_timeout_and_late_accept_still_works(self):
+        e = Engine()
+        self.assertEqual(e.step(views("menu"), 0).kind, "match")
+        self.assertIsNone(e.pending[1])
+        for now in (15, 30, 60, 120, 3600):
+            self.assertIsNone(e.step(views("unknown", "unknown"), now))
+        self.assertEqual(e.step(views("accept", "accept"), 3601).role, "leader")
+        self.assertIsNone(e.step(views("accept", "accept"), 3601.49))
+        self.assertEqual(e.step(views("accept", "accept"), 3601.5).role, "member")
+
+    def test_confirmed_queue_has_no_wait_limit(self):
+        e = Engine()
+        e.step(views("menu"), 0)
+        for now in (1, 60, 3600, 86400):
+            self.assertIsNone(e.step(views("queue", "queue"), now))
+        self.assertEqual(e.step(views("accept", "accept"), 86401).kind, "accept")
+
+    def test_accept_preempts_an_unrelated_expired_confirmation(self):
+        e = Engine()
+        e.step(views(), 0)
+        self.assertEqual(e.step(views("accept", "accept"), 30).role, "leader")
+        self.assertIsNone(e.pending)
+        self.assertEqual(e.step(views("accept", "accept"), 30.5).role, "member")
+
+    def test_match_retries_require_the_actual_menu_to_remain_visible(self):
+        e = Engine()
+        e.step(views("menu"), 0)
+        self.assertIsNone(e.step(views("menu"), 1))
+        self.assertEqual(e.step(views("menu"), 2).kind, "match")
+        self.assertEqual(e.step(views("menu"), 4).kind, "match")
+        # Even after retries, unknown/queued screens never cause a timer pause.
+        self.assertIsNone(e.step(views("unknown", "unknown"), 60))
+        with self.assertRaises(SafetyStop):
+            e.step(views("menu"), 61)
+
+    def test_resume_renews_expired_confirmation_instead_of_repausing(self):
+        e = Engine()
+        e.step(views(), 0)
+        with self.assertRaises(SafetyStop):
+            e.step(views(), 10)
+        e.on_resume(11)
+        self.assertIsNone(e.step(views(), 11))
+        self.assertEqual(e.step(views("menu"), 12).kind, "match")
+
     def test_missing_like_detection_does_not_exit_fresh_results(self):
         e = Engine()
         v = views("results", "results")

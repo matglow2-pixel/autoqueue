@@ -35,6 +35,8 @@ class Engine:
         self.liked = {"leader": [], "member": []}
         self.next_click = 0.0
         self.runs = 0
+        self.match_attempts = 0
+        self.match_retry_at = 0.0
 
     def step(self, views: dict[str, View], now: float) -> Action | None:
         for role, view in views.items():
@@ -50,12 +52,29 @@ class Engine:
                 if view.state in {"world", "menu", "queue", "results"} or now - self.absent_since[role] >= 3:
                     self.accepted.discard(role)
 
+        # Accept prompts are time-sensitive. They must be handled before an
+        # older action's confirmation deadline, even after a very long queue.
+        if any(v.state == "accept" for v in views.values()):
+            self.pending = None
+            self.match_attempts = 0
+            if self.results:
+                self.results = False
+                self.finished.clear()
+                self.liked = {"leader": [], "member": []}
+            for role in ("leader", "member"):
+                if (views[role].state == "accept" and role not in self.accepted
+                        and now - self.last_accept >= .5):
+                    self.accepted.add(role)
+                    self.last_accept = now
+                    return self.emit(Action(role, "accept"), now)
+            return None
+
         if self.pending:
             action, deadline = self.pending
             view = views[action.role]
             expected = {
                 "dungeon": {"menu"},
-                "match": {"queue", "accept"},
+                "match": {"queue", "world", "results"},
                 "return": {"world", "menu", "queue"},
             }
             if action.kind == "like":
@@ -66,12 +85,23 @@ class Engine:
                 done = view.state in expected[action.kind]
             if done:
                 self.pending = None
+                if action.kind == "match":
+                    self.match_attempts = 0
                 if action.kind == "return":
                     self.finished.add(action.role)
                     if action.role == "leader":
                         # Hand off only after the leader has actually returned.
                         self.member_at = now
-            elif now >= deadline:
+            elif action.kind == "match":
+                # An unreadable queue/transition is still a queue wait. There
+                # is no deadline for a match to be found. Only a positively
+                # detected, still-visible Match button permits a bounded retry.
+                if view.state == "menu" and now >= self.match_retry_at:
+                    if self.match_attempts >= 3:
+                        raise SafetyStop("Match stayed visible after three clicks. Check the game, then resume.")
+                    return self.emit(Action(action.role, "match"), now)
+                return None
+            elif deadline is not None and now >= deadline:
                 raise SafetyStop(
                     f"{action.role}: could not confirm {action.kind}. "
                     "Check the game screen, then resume."
@@ -80,17 +110,6 @@ class Engine:
                 return None
 
         if now < self.next_click:
-            return None
-
-        # Prompt detection always wins over opening another menu.
-        for role in ("leader", "member"):
-            if (views[role].state == "accept" and role not in self.accepted
-                    and now - self.last_accept >= .5):
-                self.accepted.add(role)
-                self.last_accept = now
-                return self.emit(Action(role, "accept"), now)
-
-        if any(v.state == "accept" for v in views.values()):
             return None
 
         if any(v.state == "results" for v in views.values()):
@@ -127,7 +146,7 @@ class Engine:
         if views["leader"].state == "world":
             return self.emit(Action("leader", "dungeon"), now, timeout=10)
         if views["leader"].state == "menu":
-            return self.emit(Action("leader", "match"), now, timeout=15)
+            return self.emit(Action("leader", "match"), now)
         return None
 
     @staticmethod
@@ -143,17 +162,34 @@ class Engine:
 
     def emit(self, action, now, timeout=None):
         self.next_click = now
-        if timeout:
+        if action.kind == "match":
+            self.pending = (action, None)
+            self.match_attempts += 1
+            self.match_retry_at = now + 2
+        elif timeout:
             self.pending = (action, now + timeout)
         return action
+
+    def on_resume(self, now):
+        """Give a fresh confirmation window instead of rethrowing old deadlines."""
+        if self.pending:
+            action, _ = self.pending
+            if action.kind == "match":
+                self.pending = (action, None)
+                self.match_attempts = 0
+                self.match_retry_at = now + 2
+            else:
+                timeout = {"dungeon": 10, "like": 4, "return": 25}[action.kind]
+                self.pending = (action, now + timeout)
 
     def rebase_after_pause(self, duration):
         """Paused time must not consume confirmation deadlines or delays."""
         if self.pending:
             action, deadline = self.pending
-            self.pending = action, deadline + duration
+            self.pending = action, deadline + duration if deadline is not None else None
         self.next_click += duration
         self.member_at += duration
         self.last_accept += duration
+        self.match_retry_at += duration
         self.absent_since = {r: t + duration for r, t in self.absent_since.items()}
         self.results_seen = {r: t + duration for r, t in self.results_seen.items()}

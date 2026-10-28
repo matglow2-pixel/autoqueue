@@ -1,4 +1,4 @@
-# Sword x Staff Autoqueue — OCR 1.2
+# Sword x Staff Autoqueue — OCR 1.3
 
 **Choose Leader, choose Member, press Start. No calibration.**
 
@@ -39,7 +39,8 @@ using the PC for something else. No ADB is required.
 
 1. Only the leader opens the dungeon entrance and presses **Match**.
 2. Both accounts press **Accept**, at least **0.5 seconds apart**. A declined match
-   returns to waiting for the next prompt.
+   returns to waiting for the next prompt. **Matchmaking has no timeout**: queues
+   lasting a minute or longer keep running, including when queue OCR is unreadable.
 3. Combat runs using the game's automatic combat; this program does not control it.
 4. Once results finish appearing, the leader likes all detected available teammates
    and presses the **bottom-left exit arrow**.
@@ -49,6 +50,14 @@ using the PC for something else. No ADB is required.
    until stopped, including after daily reward attempts are exhausted.
 
 OCR runs in the background so the control window and stop key remain responsive.
+Accept prompts take priority over all pending click-confirmation checks. The app
+can recognize the paired white Decline/yellow Accept buttons even when the dungeon
+heading is misread, with a focused lower-controls OCR pass when needed. Cancel and
+Matchmaking detection do not require a correctly read dungeon name. If Match is
+still positively visible, failed clicks get up to three attempts; an unknown or
+queued screen never triggers that retry limit or a matchmaking timer. Resuming
+after other confirmation failures renews their deadlines instead of immediately
+pausing again on an already-expired timestamp.
 Dungeon, Match, likes and exit have no deliberate per-button cooldown. The loop
 checks again after 20 milliseconds plus screen capture/processing time. After OCR
 first locates the labels, fresh screenshots validate small label patches instead
@@ -105,6 +114,9 @@ Tests cover queue/accept sequencing, half-second acceptance spacing, rapid remat
 three teammate likes, exit ordering, immediate results handoff, pause timing,
 results-button detection at different sizes, already-liked icons, letterboxing,
 low-confidence/context rejection and stopping during a blocked OCR read.
+Regression tests simulate long queues without sleeping, late Accept prompts after
+an hour, Accept overriding expired confirmations, focused control OCR and resume
+after a timeout. These are simulated times, not a live one-hour BlueStacks run.
 An integration test runs the actual bundled OCR models on generated button screens.
 It verifies that repeated unchanged screens reuse automatically read labels
 without additional OCR inference, and that changed screens invalidate those labels.

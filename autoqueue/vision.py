@@ -53,18 +53,38 @@ class Recognizer:
                 return translate(view, offset)
         # RapidOCR's numpy input uses OpenCV's BGR channel order.
         result, _ = self.reader(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), use_cls=False)
-        texts = []
-        for polygon, value, confidence in result or []:
-            points = np.asarray(polygon)
-            box = (*points.min(axis=0).astype(int), *points.max(axis=0).astype(int))
-            texts.append(Text(value, tuple(map(int, box)), float(confidence)))
+        texts = read_texts(result)
         view = classify(frame, texts)
+        if view.state == "unknown" and yellow_button_present(frame):
+            # Stylized headings and portrait art can interfere with a full-
+            # screen pass. Read just the bottom controls as a focused fallback.
+            strip_y = int(.62 * frame.shape[0])
+            result, _ = self.reader(cv2.cvtColor(frame[strip_y:], cv2.COLOR_RGB2BGR), use_cls=False)
+            for item in read_texts(result, dy=strip_y):
+                duplicates = [t for t in texts if t.key == item.key
+                              and abs(t.center[0] - item.center[0]) < 20
+                              and abs(t.center[1] - item.center[1]) < 20]
+                if not duplicates:
+                    texts.append(item)
+                elif item.confidence > max(t.confidence for t in duplicates):
+                    texts = [t for t in texts if t not in duplicates] + [item]
+            view = classify(frame, texts)
         self.cache.pop(role, None)
         if view.state in {"world", "menu", "queue", "accept"}:
             anchors = cache_anchors(frame, view.state, texts)
             if len(anchors) >= 2:
                 self.cache[role] = (frame.shape, time.monotonic(), view, anchors)
         return translate(view, offset)
+
+
+def read_texts(result, dy=0):
+    texts = []
+    for polygon, value, confidence in result or []:
+        points = np.asarray(polygon)
+        x1, y1 = points.min(axis=0).astype(int)
+        x2, y2 = points.max(axis=0).astype(int)
+        texts.append(Text(value, (int(x1), int(y1) + dy, int(x2), int(y2) + dy), float(confidence)))
+    return texts
 
 
 def translate(view, offset):
@@ -140,26 +160,27 @@ def classify(frame, texts):
         return hits[0] if len(hits) == 1 else None
 
     title = find("demonsea", (0, 0, 1, .36), contains=True)
-    accept = find("accept", (.4, .65, 1, .96))
-    decline = find("decline", (0, .65, .6, .96))
+    accept = find("accept", (.4, .65, 1, .99))
+    decline = find("decline", (0, .65, .6, .99))
     drops = find("drops", (0, .45, .5, .88))
     match = find("match", (.4, .65, 1, .96))
     cancel = find("cancel", (.4, .65, 1, .96))
     team = find("team", (0, .65, .6, .96), contains=True)
     matchmaking = find("matchmaking", (0, 0, .35, .5), contains=True)
 
-    if title and accept and decline:
+    if (accept and decline and abs(accept.center[1] - decline.center[1]) < .04 * h
+            and (title or button_pair_colors(frame, decline.center, accept.center))):
         return View("accept", targets={"accept": accept.center})
     if title and drops:
         likes, ready = find_likes(frame, drops.box[1])
         arrow = find_return(frame)
         return results_view(likes, ready, arrow)
-    if title and cancel and team:
-        return View("queue")
-    if title and match and team:
+    if cancel and team:
+        return View("queue", detail="Waiting for a match; Accept is monitored.")
+    if match and team and (title or button_pair_colors(frame, team.center, match.center)):
         return View("menu", targets={"match": match.center})
-    if title and matchmaking:
-        return View("queue")
+    if matchmaking:
+        return View("queue", detail="Waiting for a match; Accept is monitored.")
     # Restrict the world label to the minimap and require its bottom action too.
     explore = next((t for t in words if "explore" in t.key and t.center[1] > .85 * h), None)
     if title and title.center[0] > .55 * w and explore:
@@ -167,6 +188,37 @@ def classify(frame, texts):
         # this relative area in the supplied Demonseal Gorge layout.
         return View("world", targets={"dungeon": (round(.52 * w), round(.35 * h))})
     return View(detail="Waiting for the next game screen (combat/loading is normal).")
+
+
+def button_pair_colors(frame, left, right):
+    """White left pill + yellow right pill provide context if title OCR fails."""
+    h, w = frame.shape[:2]
+    fractions = []
+    for point, yellow in ((left, False), (right, True)):
+        x, y = point
+        area = frame[max(0, y - int(.02 * h)):min(h, y + int(.02 * h)),
+                     max(0, x - int(.12 * w)):min(w, x + int(.12 * w))]
+        if not area.size:
+            return False
+        hsv = cv2.cvtColor(area, cv2.COLOR_RGB2HSV)
+        if yellow:
+            mask = ((hsv[:, :, 0] > 15) & (hsv[:, :, 0] < 60)
+                    & (hsv[:, :, 1] > 65) & (hsv[:, :, 2] > 140))
+        else:
+            mask = (hsv[:, :, 1] < 65) & (hsv[:, :, 2] > 170)
+        fractions.append(float(mask.mean()))
+    return min(fractions) > .25
+
+
+def yellow_button_present(frame):
+    h, w = frame.shape[:2]
+    area = frame[int(.65 * h):, int(.4 * w):]
+    hsv = cv2.cvtColor(area, cv2.COLOR_RGB2HSV)
+    mask = ((hsv[:, :, 0] > 15) & (hsv[:, :, 0] < 60)
+            & (hsv[:, :, 1] > 65) & (hsv[:, :, 2] > 140)).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return any(.2 * w < bw < .55 * w and .02 * h < bh < .1 * h and bw / bh > 2.3
+               for _, _, bw, bh in (cv2.boundingRect(c) for c in contours))
 
 
 def find_likes(frame, drops_y, min_buttons=1):

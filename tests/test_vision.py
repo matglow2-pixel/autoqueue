@@ -53,6 +53,38 @@ class VisionTests(unittest.TestCase):
         self.assertEqual(classify(self.frame, labels[1:]).state, "unknown")
         self.assertEqual(classify(self.frame, labels[:2]).state, "unknown")
 
+    def test_accept_pair_survives_misread_dungeon_heading(self):
+        frame = self.frame.copy()
+        cv2.rectangle(frame, (30, 925), (285, 975), (225, 225, 225), -1)
+        cv2.rectangle(frame, (310, 925), (575, 975), (205, 216, 75), -1)
+        labels = [text("Enter Dem0nseai G0rge - Hard", 300, 80),
+                  text("Decline", 160, 950), text("Accept", 440, 950)]
+        self.assertEqual(classify(frame, labels).state, "accept")
+        self.assertEqual(classify(frame, labels).targets["accept"], (440, 950))
+
+    def test_queue_detection_does_not_depend_on_dungeon_name_ocr(self):
+        labels = [text("Team 2/4", 150, 940), text("Cancel", 440, 940)]
+        self.assertEqual(classify(self.frame, labels).state, "queue")
+        self.assertEqual(classify(self.frame, [text("Matchmaking...", 100, 340)]).state, "queue")
+
+    def test_bottom_controls_get_focused_ocr_when_full_frame_is_unreadable(self):
+        frame = self.frame.copy()
+        cv2.rectangle(frame, (30, 925), (285, 975), (225, 225, 225), -1)
+        cv2.rectangle(frame, (310, 925), (575, 975), (205, 216, 75), -1)
+        calls = []
+        def reader(image, **kwargs):
+            calls.append(image.shape)
+            if len(calls) == 1:
+                return None, None
+            # Coordinates in the cropped lower control strip.
+            y = 950 - int(.62 * 1100)
+            return [([[x-30, y-10], [x+30, y-10], [x+30, y+10], [x-30, y+10]], value, .99)
+                    for value, x in (("Accept", 440), ("Decline", 160))], None
+        view = Recognizer(reader).inspect(Image.fromarray(frame))
+        self.assertEqual(len(calls), 2)
+        self.assertLess(calls[1][0], calls[0][0])
+        self.assertEqual(view.targets["accept"], (440, 950))
+
     def test_match_and_cancel_are_not_confused_with_matchmaking(self):
         labels = [self.title, text("Team 2/4", 150, 940), text("Match", 440, 940)]
         self.assertEqual(classify(self.frame, labels).targets["match"], (440, 940))

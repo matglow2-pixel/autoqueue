@@ -15,6 +15,7 @@ class Control:
         self.stopped = threading.Event()
         self.paused_at = None
         self.paused_total = 0.0
+        self.resume_generation = 0
 
     def active(self):
         return self.running.is_set() and not self.stopped.is_set()
@@ -35,6 +36,7 @@ class Control:
             if self.paused_at is not None:
                 self.paused_total += time.monotonic() - self.paused_at
                 self.paused_at = None
+                self.resume_generation += 1
             self.running.set()
 
     def stop(self):
@@ -52,6 +54,7 @@ class Runner(threading.Thread):
         self.recognizer_factory = recognizer_factory
         self.engine = Engine()
         self.sizes = {}
+        self.resume_generation = 0
 
     def send(self, kind, text):
         self.events.put((kind, text))
@@ -92,6 +95,10 @@ class Runner(threading.Thread):
                 views = {role: self.observe(role) for role in ("leader", "member")}
                 if not self.control.active():
                     continue
+                with self.control.lock:
+                    if self.resume_generation != self.control.resume_generation:
+                        self.engine.on_resume(self.control.now())
+                        self.resume_generation = self.control.resume_generation
                 summary = "; ".join(f"{r}: {v.state}" + (f" ({v.detail})" if v.detail else "")
                                     for r, v in views.items())
                 self.send("status", f"{self.engine.runs} cycles completed · {summary}")
@@ -127,7 +134,10 @@ class Runner(threading.Thread):
                             planned.last_accept = clicked_at
                         if planned.pending:
                             pending_action, deadline = planned.pending
-                            planned.pending = pending_action, deadline + clicked_at - decision_time
+                            if deadline is not None:
+                                planned.pending = pending_action, deadline + clicked_at - decision_time
+                            if pending_action.kind == "match":
+                                planned.match_retry_at += clicked_at - decision_time
                         self.engine = planned
                     self.send("log", f"{action.role}: {action.kind}")
             except Exception as error:
