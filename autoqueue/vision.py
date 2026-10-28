@@ -325,28 +325,34 @@ def results_layout(frame, divider_y):
     points = find_like_icons(frame, divider_y)
     targets = {f"like_{i + 1}": p for i, p in enumerate(points)}
     targets["return"] = find_return(frame) or (round(.11 * w), round(.955 * h))
-    return View("results", points, targets, True, f"{len(points)} thumbs-up icons; bottom-left Exit ready.")
+    complete = liked_row_complete(frame, divider_y)
+    ready = bool(points) or complete
+    detail = (f"{len(points)} thumbs-up icons; verify likes before Exit." if points else
+              "All teammate thumbs are gold; Exit ready." if complete else
+              "No thumbs recognized yet; keeping results open.")
+    return View("results", points, targets, ready, detail)
 
 
 def find_like_icons(frame, divider_y):
     """White rounded buttons with dark thumbs; never gold own-player counters."""
     h, w = frame.shape[:2]
-    top = max(0, round(divider_y - .18 * w))
-    bottom = min(h, round(divider_y - .045 * w))
+    top = max(0, round(divider_y - .22 * h))
+    bottom = min(h, round(divider_y - .008 * h))
     if bottom <= top:
         return []
     area = frame[top:bottom]
     hsv = cv2.cvtColor(area, cv2.COLOR_RGB2HSV)
-    white = ((hsv[:, :, 1] < 75) & (hsv[:, :, 2] > 155)).astype(np.uint8) * 255
-    white = cv2.morphologyEx(white, cv2.MORPH_CLOSE,np.ones((3, 3), np.uint8))
-    contours, _ = cv2.findContours(white, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    white = ((hsv[:, :, 1] < 95) & (hsv[:, :, 2] > 125)).astype(np.uint8) * 255
+    closed = cv2.morphologyEx(white, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     candidates = []
     expected_y = divider_y - .11 * w
     for contour in contours:
         x, y, bw, bh = cv2.boundingRect(contour)
         fill = cv2.contourArea(contour) / (bw * bh)
-        if not (.055 * w < bw < .20 * w and .018 * w < bh < .085 * w
-                and 1.7 < bw / bh < 4.5 and fill > .55):
+        coverage = np.mean(white[y:y+bh, x:x+bw] > 0)
+        if not (.045 * w < bw < .20 * w and .012 * h < bh < .065 * h
+                and 1.6 < bw / bh < 5 and fill > .55 and coverage > .55):
             continue
         center = hsv[y + bh // 5:y + 4 * bh // 5, x + bw // 4:x + 3 * bw // 4]
         dark = np.mean(center[:, :, 2] < 130)
@@ -355,7 +361,40 @@ def find_like_icons(frame, divider_y):
             continue
         point = (x + bw // 2, top + y + bh // 2)
         candidates.append((fill - abs(point[1] - expected_y) / w, point))
-    return sorted(p for _, p in sorted(candidates, reverse=True)[:4])
+    # The like buttons are the lowest aligned row above Drops. Bright avatar
+    # details and names higher up must not replace that row when its UI shifts.
+    groups = []
+    for _, point in candidates:
+        group = [item for item in candidates if abs(item[1][1] - point[1]) < .018 * h]
+        groups.append(group)
+    if not groups:
+        return []
+    row = max(groups, key=lambda g: (len(g) >= 2, np.mean([p[1] for _, p in g])))
+    return sorted(p for _, p in sorted(row, reverse=True)[:4])
+
+
+def liked_row_complete(frame, divider_y):
+    """Zero white matches is only completion when three gold pills are visible."""
+    h, w = frame.shape[:2]
+    top, bottom = max(0, int(divider_y - .22 * h)), max(0, int(divider_y - .008 * h))
+    if bottom <= top:
+        return False
+    hsv = cv2.cvtColor(frame[top:bottom], cv2.COLOR_RGB2HSV)
+    gold = ((hsv[:, :, 0] >= 15) & (hsv[:, :, 0] <= 55)
+            & (hsv[:, :, 1] > 40) & (hsv[:, :, 2] > 60)).astype(np.uint8) * 255
+    gold = cv2.morphologyEx(gold, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    contours, _ = cv2.findContours(gold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    centers = []
+    for contour in contours:
+        x, y, bw, bh = cv2.boundingRect(contour)
+        if not (.055 * w < bw < .20 * w and .012 * h < bh < .065 * h
+                and 1.6 < bw / bh < 4.5 and cv2.contourArea(contour) / (bw * bh) > .55):
+            continue
+        icon = hsv[y + bh // 5:y + 4 * bh // 5, x + bw // 4:x + 3 * bw // 4]
+        if np.mean((icon[:, :, 1] > 80) & (icon[:, :, 2] > 125)) > .08:
+            centers.append((x + bw // 2, top + y + bh // 2))
+    return any(sum(abs(y - other_y) < .018 * h for _, other_y in centers) >= 3
+               for _, y in centers)
 
 
 def rank_banner(frame):

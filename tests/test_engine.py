@@ -53,18 +53,22 @@ class EngineTests(unittest.TestCase):
 
     def test_member_cleanup_then_leader_then_five_second_reload(self):
         e = Engine()
-        a = e.step(views("results", "results"), 0)
+        self.assertIsNone(e.step(views("results", "results"), 0))
+        self.assertIsNone(e.step(views("results", "results"), 1.99))
+        a = e.step(views("results", "results"), 2)
         self.assertEqual((a.role, a.kind), ("member", "cleanup"))
-        self.assertIsNone(e.step(views("results", "results"), .1))
-        a = e.step(views("results", "world"), 1)
+        self.assertIsNone(e.step(views("results", "results"), 2.1))
+        a = e.step(views("results", "world"), 3)
         self.assertEqual((a.role, a.kind), ("leader", "cleanup"))
-        self.assertIsNone(e.step(views(), 1.1))
+        self.assertIsNone(e.step(views(), 3.1))
         self.assertEqual(e.runs, 1)
-        self.assertIsNone(e.step(views(), 5.99))
-        self.assertEqual(e.step(views(), 6).kind, "dungeon")
+        self.assertIsNone(e.step(views(), 7.99))
+        self.assertEqual(e.step(views(), 8).kind, "dungeon")
 
     def test_member_starts_without_waiting_for_leaders_end_screen(self):
-        action = Engine().step(views("unknown", "results"), 0)
+        engine = Engine()
+        self.assertIsNone(engine.step(views("unknown", "results"), 0))
+        action = engine.step(views("unknown", "results"), 2)
         self.assertEqual((action.role, action.kind), ("member", "cleanup"))
 
     def test_stuck_click_pauses_instead_of_spamming(self):
@@ -77,8 +81,9 @@ class EngineTests(unittest.TestCase):
         e = Engine()
         v = views("results", "results")
         e.step(v, 0)
+        e.step(v, 2)
         with self.assertRaises(SafetyStop):
-            e.step(v, 25)
+            e.step(v, 27)
 
     def test_pause_preserves_pending_deadline(self):
         e = Engine()
@@ -97,16 +102,18 @@ class EngineTests(unittest.TestCase):
     def test_no_individual_thumb_confirmation_between_row_taps(self):
         e = Engine()
         both = views("results", "results", [(100, 700)], [(300, 700)])
-        self.assertEqual(e.step(both, 0).kind, "cleanup")
-        self.assertIsNone(e.step(both, .1))
-        self.assertEqual(e.step(views("results", "world", [(100, 700)]), .2).role, "leader")
+        self.assertIsNone(e.step(both, 0))
+        self.assertEqual(e.step(both, 2).kind, "cleanup")
+        self.assertIsNone(e.step(both, 2.1))
+        self.assertEqual(e.step(views("results", "world", [(100, 700)]), 2.2).role, "leader")
 
     def test_results_wait_only_until_buttons_are_readable(self):
         e = Engine()
         unreadable = views("results", "results")
         unreadable["member"].likes_ready = False
         self.assertIsNone(e.step(unreadable, 0))
-        action = e.step(views("results", "results", [(100, 700)]), .02)
+        self.assertIsNone(e.step(views("results", "results", [(100, 700)]), 1.99))
+        action = e.step(views("results", "results", [(100, 700)]), 2)
         self.assertEqual(action.kind, "cleanup")
 
     def test_match_click_has_no_fixed_delay_after_dungeon_opens(self):
@@ -168,7 +175,17 @@ class EngineTests(unittest.TestCase):
     def test_results_layout_is_sufficient_even_when_individual_icons_are_missing(self):
         e = Engine()
         v = views("results", "results")
-        self.assertEqual(e.step(v, 0).kind, "cleanup")
+        self.assertIsNone(e.step(v, 0))
+        self.assertEqual(e.step(v, 2).kind, "cleanup")
+
+    def test_member_waits_two_seconds_and_leader_one_second_for_results(self):
+        e = Engine()
+        self.assertIsNone(e.step(views("unknown", "results"), 0))
+        self.assertIsNone(e.step(views("unknown", "results"), 1.99))
+        self.assertEqual(e.step(views("unknown", "results"), 2).role, "member")
+        self.assertIsNone(e.step(views("results", "world"), 3))
+        self.assertIsNone(e.step(views("results", "world"), 3.99))
+        self.assertEqual(e.step(views("results", "world"), 4).role, "leader")
 
 
 if __name__ == "__main__":

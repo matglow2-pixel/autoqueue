@@ -1,4 +1,4 @@
-# Sword x Staff Autoqueue — OCR 1.5
+# Sword x Staff Autoqueue — OCR 1.6
 
 **Choose Leader, choose Member, press Start. No calibration.**
 
@@ -42,10 +42,14 @@ using the PC for something else. No ADB is required.
    returns to waiting for the next prompt. **Matchmaking has no timeout**: queues
    lasting a minute or longer keep running, including when queue OCR is unreadable.
 3. Combat runs using the game's automatic combat; this program does not control it.
-4. **Member first:** click every detected white thumbs-up icon, then the
-   **bottom-left exit button**, as one fast sequence. Up to four actual icons are
+4. **Member first:** wait **two seconds after its end screen appears**, read
+   the buttons again, and click every detected white thumbs-up icon. Pause a
+   fresh random **0.2–0.5 seconds between likes**. Verify the batch, then press the
+   **bottom-left exit button**. Up to four actual icons are
    supported; the game's own-player counter and already-gold icons are skipped.
-5. **Leader second:** when the member is visibly outside, do the same on the leader.
+5. **Leader second:** do the same, with a **one-second end-screen wait**. This
+   wait is measured from when the leader's results first appeared, so it may
+   already have elapsed while the member was handled.
 6. Wait **five seconds after the leader's Exit click** for the dungeon to reload.
    A countdown is shown in the status. Both accounts must be back outside.
 7. The leader opens the dungeon again. Runs continue
@@ -61,7 +65,7 @@ still positively visible, failed clicks get up to three attempts; an unknown or
 queued screen never triggers that retry limit or a matchmaking timer. Resuming
 after other confirmation failures renews their deadlines instead of immediately
 pausing again on an already-expired timestamp.
-Dungeon, Match, likes and exit have no deliberate per-button cooldown. The loop
+Dungeon and Match have no deliberate per-button cooldown. The loop
 checks again after 20 milliseconds plus screen capture/processing time. After OCR
 first locates the labels, fresh screenshots validate small label patches instead
 of repeatedly running full-window OCR. A changed label triggers OCR again. These
@@ -71,13 +75,23 @@ the entire desktop separately for each game. Run setup again to install MSS.
 Results use the large rank banner and Drops divider to recognize the end screen
 even if individual icon recognition fails. Only white thumb buttons with a dark
 icon are clicked; it does not tap avatar positions or the own-player counter.
-All detected thumb clicks and Exit run together, with no screenshot, OCR or
-color-change confirmation between individual likes. There is a 10 ms input
-dispatch interval between taps. Pause/Stop can interrupt the sequence, and a
+Thumb clicks run as a batch with the requested random spacing, without OCR
+between individual likes. The mouse moves for a random 100–180 ms toward each
+target, and presses last a random 40–80 ms so BlueStacks can register the down/up
+events. One check after the batch confirms likes before Exit.
+Still-white thumbs are retried up to twice; uncertain detection keeps results
+open instead of exiting. Zero detected thumbs is only completion when three gold
+teammate buttons positively confirm the row is done. Buttons are searched over
+a wider row area with more tolerance for dimmer member-window rendering.
+Pause/Stop can interrupt the sequence, and a
 resumed sequence remembers completed clicks. The exit glyph is used when found;
 otherwise the center of the black bottom-left exit button in the supplied layout
 is clicked. Cleanup no longer waits for an exact arrow silhouette to match.
 Actual response time depends on your PC and BlueStacks updating its screen.
+If recognition remains uncertain, a local screenshot is saved under
+`%LOCALAPPDATA%\SwordStaffAutoqueue\debug` and its path is printed in the log.
+Screenshots are not uploaded. The app keeps the results open so the failure can
+be inspected instead of silently skipping likes.
 When switching accounts, the app temporarily shares Windows input queues to
 request focus and waits for activation. If Windows still denies the request,
 it can click the visible BlueStacks title bar to activate that window. It then
@@ -119,7 +133,8 @@ python -m unittest discover -s tests -v
 ```
 
 Tests cover queue/accept sequencing, 1.5-second acceptance spacing, rapid rematches,
-actual thumb-button detection, member-first cleanup, the five-second reload delay, pause timing,
+actual thumb-button detection, member-first cleanup, 2s/1s end-screen waits,
+random like intervals, the five-second reload delay, pause timing,
 results-button detection at different sizes, already-liked icons, letterboxing,
 low-confidence/context rejection and stopping during a blocked OCR read.
 Regression tests simulate long queues without sleeping, late Accept prompts after
@@ -127,7 +142,9 @@ an hour, Accept overriding expired confirmations, focused control OCR and resume
 after a timeout. These are simulated times, not a live one-hour BlueStacks run.
 An integration test runs the actual bundled OCR models on generated button screens.
 The runner tests record both accounts' exact click order, verify no OCR between
-likes, and check interrupted cleanup resumes without repeating completed clicks.
+individual likes, retry unregistered likes before Exit, and check interrupted
+cleanup resumes without repeating completed clicks. Unknown zero scans are
+tested to prohibit Exit, with positive gold-row confirmation tested separately.
 It verifies that repeated unchanged screens reuse automatically read labels
 without additional OCR inference, and that changed screens invalidate those labels.
 Focus regressions cover delayed activation, denied requests, title-bar fallback,

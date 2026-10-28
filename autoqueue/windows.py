@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from PIL import Image
 
 from .engine import SafetyStop
-from .focus import activate
+from .focus import activate, registered_click
 
 user32 = C.WinDLL("user32", use_last_error=True)
 user32.GetForegroundWindow.restype = W.HWND
@@ -179,7 +179,7 @@ class Window:
             raise SafetyStop("Click target is covered by another window.")
         if not allowed():
             raise SafetyStop("Input stopped.")
-        pyautogui.click(x + px, y + py, _pause=False)
+        registered_click(pyautogui, x + px, y + py, allowed)
         return True
 
 

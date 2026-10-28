@@ -29,6 +29,7 @@ class Engine:
         self.last_accept = float("-inf")
         self.pending = None
         self.results = False
+        self.results_seen = {}
         self.finished = set()
         self.next_click = 0.0
         self.runs = 0
@@ -38,6 +39,10 @@ class Engine:
 
     def step(self, views: dict[str, View], now: float) -> Action | None:
         for role, view in views.items():
+            if view.state == "results":
+                self.results_seen.setdefault(role, now)
+            elif view.state in {"world", "menu", "queue", "accept"}:
+                self.results_seen.pop(role, None)
             if view.state == "accept":
                 self.absent_since.pop(role, None)
             else:
@@ -110,6 +115,9 @@ class Engine:
             view = views[role]
             if view.state != "results":
                 return None
+            wait = 2 if role == "member" else 1
+            if now - self.results_seen[role] < wait:
+                return None
             if not view.likes_ready:
                 return None
             return self.emit(Action(role, "cleanup"), now, timeout=25)
@@ -162,4 +170,5 @@ class Engine:
         self.last_accept += duration
         self.match_retry_at += duration
         self.requeue_at += duration
+        self.results_seen = {r: t + duration for r, t in self.results_seen.items()}
         self.absent_since = {r: t + duration for r, t in self.absent_since.items()}

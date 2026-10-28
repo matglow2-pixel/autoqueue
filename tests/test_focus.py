@@ -1,7 +1,7 @@
 import unittest
 
 from autoqueue.engine import SafetyStop
-from autoqueue.focus import activate, request_foreground
+from autoqueue.focus import activate, request_foreground, registered_click
 
 
 class FakeDesktop:
@@ -45,6 +45,28 @@ class FakeDesktop:
 
 
 class FocusTests(unittest.TestCase):
+    def test_game_tap_has_a_real_hold_and_always_releases(self):
+        commands = []
+        class Mouse:
+            def moveTo(self, **kwargs):
+                self_duration = kwargs['duration']
+                commands.append(('move', self_duration))
+            def mouseDown(self, **kwargs):
+                commands.append('down')
+            def mouseUp(self, **kwargs):
+                commands.append('up')
+        def wait(delay):
+            self.assertEqual(delay, .06)
+            commands.append('hold')
+        choose = lambda a, b: (a + b) / 2
+        registered_click(Mouse(), 20, 30, sleep=wait, random_delay=choose)
+        self.assertEqual(commands, [('move', .14), 'down', 'hold', 'up'])
+        commands.clear()
+        def interrupted(delay):
+            raise RuntimeError('Input interrupted')
+        with self.assertRaises(RuntimeError):
+            registered_click(Mouse(), 20, 30, sleep=interrupted, random_delay=choose)
+        self.assertEqual(commands, [('move', .14), 'down', 'up'])
     def test_already_active_window_needs_no_input_or_attachment(self):
         api = FakeDesktop()
         api.current = 2

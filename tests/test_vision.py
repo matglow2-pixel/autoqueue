@@ -134,10 +134,10 @@ class VisionTests(unittest.TestCase):
             self.assertTrue(ready)
             self.assertEqual(len(likes), 3 - liked)
 
-    def test_confirmed_results_without_white_thumbs_supply_only_exit(self):
+    def test_zero_detected_thumbs_without_gold_confirmation_never_allows_exit(self):
         view = classify(self.frame, [self.title, text("Drops", 70, 760)])
         self.assertEqual(view.state, "results")
-        self.assertTrue(view.likes_ready)
+        self.assertFalse(view.likes_ready)
         self.assertEqual(view.likes, [])
         self.assertEqual(list(view.targets), ['return'])
 
@@ -169,6 +169,20 @@ class VisionTests(unittest.TestCase):
         self.assertEqual(len(view.likes), 4)
         self.assertIn((235, 715), view.likes)
 
+    def test_member_thumbs_are_found_when_the_row_moves_or_buttons_are_dim(self):
+        for shift in (-85, 40):
+            for brightness in (.7, 1):
+                with self.subTest(shift=shift, brightness=brightness):
+                    image = results_image()
+                    row = image[690:740].copy()
+                    image[690:740] = (25, 52, 49)
+                    image[690+shift:740+shift] = row
+                    image = (image.astype(np.float32) * brightness).astype(np.uint8)
+                    view = classify(image, [self.title, text('Drops', 70, 760)])
+                    self.assertTrue(view.likes_ready)
+                    self.assertEqual(len(view.likes), 3)
+                    self.assertTrue(all(abs(y - (715 + shift)) < 8 for _, y in view.likes))
+
     def test_like_clicks_do_not_depend_on_exit_arrow_recognition(self):
         image = results_image()
         image[1000:] = (25, 52, 49)
@@ -187,7 +201,7 @@ class VisionTests(unittest.TestCase):
             self.fail("The results layout should be recognized without OCR")
         view = Recognizer(forbidden_reader).inspect(Image.fromarray(image))
         self.assertEqual(view.state, "results")
-        self.assertTrue(view.likes_ready)
+        self.assertFalse(view.likes_ready)
         self.assertEqual(view.likes, [])
         self.assertEqual(list(view.targets), ['return'])
         self.assertEqual(view.targets["return"], (66, 1050))

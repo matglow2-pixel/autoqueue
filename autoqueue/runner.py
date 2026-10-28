@@ -1,7 +1,10 @@
 """Background OCR and guarded input. The GUI stays responsive during inference."""
 import copy
+import os
+import random
 import threading
 import time
+from pathlib import Path
 
 from .engine import Engine, SafetyStop
 from .vision import Recognizer
@@ -46,17 +49,22 @@ class Control:
 
 
 class Runner(threading.Thread):
-    def __init__(self, targets, events, recognizer_factory=Recognizer):
+    def __init__(self, targets, events, recognizer_factory=Recognizer, like_delay=None):
         super().__init__(daemon=True)
         self.targets = targets
         self.events = events
         self.control = Control()
         self.recognizer_factory = recognizer_factory
+        self.like_delay = like_delay or (lambda: random.uniform(.2, .5))
         self.engine = Engine()
         self.sizes = {}
         self.resume_generation = 0
         self.cleanup_progress = {}
         self.cleanup_sequences = {}
+        self.verification_since = {}
+        self.cleanup_retries = {}
+        self.missing_likes_since = {}
+        self.diagnostic_saved = set()
 
     def send(self, kind, text):
         self.events.put((kind, text))
@@ -69,10 +77,58 @@ class Runner(threading.Thread):
             raise SafetyStop("Window resized. Stop and Start to use its new size.")
         self.sizes[role] = size
         view = self.recognizer.inspect(image, role=role)
+        if view.state == "results" and not view.likes_ready:
+            self.missing_likes_since.setdefault(role, self.control.now())
+            if self.control.now() - self.missing_likes_since[role] >= 3:
+                self.save_diagnostic(role, image)
+        else:
+            self.missing_likes_since.pop(role, None)
         if view.state in {"world", "menu", "queue"}:
             self.cleanup_progress.pop(role, None)
             self.cleanup_sequences.pop(role, None)
+            self.verification_since.pop(role, None)
+            self.cleanup_retries.pop(role, None)
+            self.diagnostic_saved.discard(role)
         return view
+
+    def save_diagnostic(self, role, image=None):
+        if role in self.diagnostic_saved:
+            return
+        try:
+            if image is None:
+                image = self.targets[role].capture()
+            folder = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "SwordStaffAutoqueue" / "debug"
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{role}-results-{time.strftime('%Y%m%d-%H%M%S')}.png"
+            image.save(path)
+            self.diagnostic_saved.add(role)
+            self.send("log", f"{role}: results kept open. Diagnostic screenshot saved: {path}")
+        except OSError as error:
+            self.send("log", f"Could not save diagnostic screenshot: {error}")
+
+    def verify_likes(self, role):
+        fresh = self.observe(role)
+        if not self.control.active() or fresh.state != "results":
+            return False
+        if fresh.likes_ready and not fresh.likes:
+            return True  # Three gold teammate buttons positively confirm completion.
+        now = self.control.now()
+        self.verification_since.setdefault(role, now)
+        elapsed = now - self.verification_since[role]
+        if fresh.likes and elapsed >= .3:
+            retries = self.cleanup_retries.get(role, 0)
+            if retries >= 2:
+                self.save_diagnostic(role)
+                raise SafetyStop(f"{role}: thumbs still visible after retries; results kept open.")
+            self.cleanup_sequences[role] = cleanup_points(fresh)
+            self.cleanup_progress[role] = 0
+            self.cleanup_retries[role] = retries + 1
+            self.verification_since.pop(role, None)
+            self.send("log", f"{role}: retrying {len(fresh.likes)} thumbs that did not register.")
+        elif not fresh.likes_ready and elapsed >= 1:
+            self.save_diagnostic(role)
+            raise SafetyStop(f"{role}: could not verify likes; results kept open.")
+        return False
 
     def cleanup(self, role, view):
         points = self.cleanup_sequences.get(role) or cleanup_points(view)
@@ -83,6 +139,11 @@ class Runner(threading.Thread):
         if index == 0:
             self.send("log", f"{role}: clicking {len(points) - 1} thumbs-up icons, then Exit.")
         while index < len(points):
+            if not self.control.active():
+                return False
+            # Check once after the whole batch, not between individual likes.
+            if index == len(points) - 1 and not self.verify_likes(role):
+                return False
             with self.control.lock:
                 if not self.control.active():
                     return False
@@ -95,7 +156,8 @@ class Runner(threading.Thread):
             # Let Windows dispatch this tap, without another screenshot/OCR or
             # per-like acknowledgement. Pause/Stop can interrupt the sequence.
             if index < len(points):
-                self.control.stopped.wait(.01)
+                delay = self.like_delay() if index < len(points) - 1 else .01
+                self.control.stopped.wait(delay)
         return True
 
     def run(self):
@@ -131,6 +193,16 @@ class Runner(threading.Thread):
                         self.resume_generation = self.control.resume_generation
                 summary = "; ".join(f"{r}: {v.state}" + (f" ({v.detail})" if v.detail else "")
                                     for r, v in views.items())
+                settling = []
+                for role, view in views.items():
+                    if view.state == "results":
+                        wait = 2 if role == "member" else 1
+                        seen = self.engine.results_seen.get(role, self.control.now())
+                        left = wait - (self.control.now() - seen)
+                        if left > 0:
+                            settling.append(f"{role} end-screen wait {left:.1f}s")
+                if settling:
+                    summary += " · " + "; ".join(settling)
                 self.send("status", f"{self.engine.runs} cycles completed · {summary}")
                 remaining = self.engine.requeue_at - self.control.now()
                 if remaining > 0 and all(v.state in {"world", "menu"} for v in views.values()):

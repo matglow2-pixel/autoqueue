@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from autoqueue.engine import Action, View
+from autoqueue.engine import Action, View, SafetyStop
 from autoqueue.runner import Control, Runner, action_point, cleanup_points
 
 
@@ -129,8 +129,9 @@ class RunnerTests(unittest.TestCase):
 
     def test_cleanup_clicks_all_detected_icons_then_exit_without_more_ocr(self):
         windows = {'leader': FakeWindow(), 'member': FakeWindow()}
-        runner = Runner(windows, queue.SimpleQueue())
+        runner = Runner(windows, queue.SimpleQueue(), like_delay=lambda: 0)
         runner.sizes['member'] = (600, 1100)
+        runner.observe = lambda role: View('results', targets={'return': (66, 1050)})
         view = results_view()
         self.assertTrue(runner.cleanup('member', view))
         self.assertEqual(windows['member'].clicks, list(cleanup_points(view)))
@@ -146,7 +147,7 @@ class RunnerTests(unittest.TestCase):
                     runner.control.stop()
                 return True
         window = StoppingWindow()
-        runner = Runner({'leader': FakeWindow(), 'member': window}, queue.SimpleQueue())
+        runner = Runner({'leader': FakeWindow(), 'member': window}, queue.SimpleQueue(), like_delay=lambda: 0)
         runner.sizes['member'] = (600, 1100)
         self.assertFalse(runner.cleanup('member', results_view()))
         self.assertEqual(window.clicks, [(100, 715), (250, 715)])
@@ -161,12 +162,13 @@ class RunnerTests(unittest.TestCase):
                 self.clicks.append(point)
                 return True
         window = InterruptedWindow()
-        runner = Runner({'leader': FakeWindow(), 'member': window}, queue.SimpleQueue())
+        runner = Runner({'leader': FakeWindow(), 'member': window}, queue.SimpleQueue(), like_delay=lambda: 0)
         runner.sizes['member'] = (600, 1100)
         self.assertFalse(runner.cleanup('member', results_view()))
         # Already-liked icons can disappear from a later screenshot. Continue
         # the original authorized sequence without double-clicking prior icons.
         changed_view = View('results', targets={'like_1': (400, 715), 'return': (66, 1050)})
+        runner.observe = lambda role: View('results', targets={'return': (66, 1050)})
         self.assertTrue(runner.cleanup('member', changed_view))
         self.assertEqual(window.clicks, list(cleanup_points(results_view())))
 
@@ -174,11 +176,18 @@ class RunnerTests(unittest.TestCase):
         states = {'leader': 'results', 'member': 'results'}
         clicks = []
         reads = []
+        trace = []
         exit_times = {}
+        remaining = {r: list(cleanup_points(results_view())[:-1]) for r in states}
         class ResultsOCR:
             def inspect(self, image, role='default'):
                 reads.append(role)
-                return results_view() if states[role] == 'results' else View('world')
+                trace.append(('read', role))
+                if states[role] != 'results':
+                    return View('world')
+                targets = {f'like_{i+1}': p for i, p in enumerate(remaining[role])}
+                targets['return'] = (66, 1050)
+                return View('results', likes=remaining[role].copy(), targets=targets)
         class ResultsWindow(FakeWindow):
             def __init__(self, role):
                 super().__init__()
@@ -186,6 +195,9 @@ class RunnerTests(unittest.TestCase):
 
             def click(self, point, **kwargs):
                 clicks.append((self.role, point))
+                trace.append(('click', self.role, point))
+                if point in remaining[self.role]:
+                    remaining[self.role].remove(point)
                 if point == (66, 1050):
                     states[self.role] = 'world'
                     exit_times[self.role] = runner.control.now()
@@ -193,18 +205,71 @@ class RunnerTests(unittest.TestCase):
                         runner.control.stop()
                 return True
         windows = {r: ResultsWindow(r) for r in states}
-        runner = Runner(windows, queue.SimpleQueue(), recognizer_factory=ResultsOCR)
+        runner = Runner(windows, queue.SimpleQueue(), recognizer_factory=ResultsOCR, like_delay=lambda: 0)
         runner.start()
         runner.join(3)
         try:
             self.assertFalse(runner.is_alive())
             points = cleanup_points(results_view())
             self.assertEqual(clicks, [('member', p) for p in points] + [('leader', p) for p in points])
-            self.assertEqual(len(reads), 6)  # No OCR pass between individual likes.
+            for role in states:
+                indices = [i for i, event in enumerate(trace) if event[0] == 'click'
+                           and event[1] == role and event[2] != (66, 1050)]
+                self.assertEqual(indices[-1] - indices[0], 3)  # No OCR between four likes.
             self.assertGreaterEqual(runner.engine.requeue_at, exit_times['leader'] + 5)
         finally:
             runner.control.stop()
             runner.join(2)
+
+    def test_random_pause_between_each_like_is_in_requested_range(self):
+        runner = Runner({'leader': FakeWindow(), 'member': FakeWindow()}, queue.SimpleQueue())
+        runner.sizes['member'] = (600, 1100)
+        runner.observe = lambda role: View('results', targets={'return': (66, 1050)})
+        with patch('autoqueue.runner.random.uniform', return_value=.35) as random_delay:
+            with patch.object(runner.control.stopped, 'wait', return_value=False) as wait:
+                self.assertTrue(runner.cleanup('member', results_view()))
+        self.assertEqual(random_delay.call_count, 3)
+        self.assertTrue(all(c.args == (.2, .5) for c in random_delay.call_args_list))
+        self.assertEqual([c.args[0] for c in wait.call_args_list], [.35, .35, .35, .01])
+
+    def test_zero_uncertain_scan_never_sends_exit(self):
+        window = FakeWindow()
+        runner = Runner({'leader': FakeWindow(), 'member': window}, queue.SimpleQueue(), like_delay=lambda: 0)
+        unknown = View('results', targets={'return': (66, 1050)}, likes_ready=False)
+        self.assertFalse(runner.cleanup('member', unknown))
+        self.assertEqual(window.clicks, [])
+
+    def test_unconfirmed_zero_after_like_batch_still_does_not_exit(self):
+        window = FakeWindow()
+        runner = Runner({'leader': FakeWindow(), 'member': window}, queue.SimpleQueue(), like_delay=lambda: 0)
+        runner.sizes['member'] = (600, 1100)
+        runner.observe = lambda role: View('results', targets={'return': (66, 1050)}, likes_ready=False)
+        with patch.object(runner.control, 'now', return_value=0):
+            self.assertFalse(runner.cleanup('member', results_view()))
+        with patch.object(runner.control, 'now', return_value=1.1):
+            with patch.object(runner, 'save_diagnostic') as save:
+                with self.assertRaisesRegex(SafetyStop, 'results kept open'):
+                    runner.cleanup('member', results_view())
+                save.assert_called_once_with('member')
+        self.assertNotIn((66, 1050), window.clicks)
+
+    def test_still_visible_thumbs_are_retried_before_exit(self):
+        windows = {'leader': FakeWindow(), 'member': FakeWindow()}
+        runner = Runner(windows, queue.SimpleQueue(), like_delay=lambda: 0)
+        runner.sizes['member'] = (600, 1100)
+        original = results_view()
+        retry = View('results', likes=[(100, 715), (400, 715)],
+                     targets={'like_1': (100, 715), 'like_2': (400, 715), 'return': (66, 1050)})
+        runner.observe = lambda role: retry
+        with patch.object(runner.control, 'now', return_value=0):
+            self.assertFalse(runner.cleanup('member', original))
+        self.assertNotIn((66, 1050), windows['member'].clicks)
+        with patch.object(runner.control, 'now', return_value=.31):
+            self.assertFalse(runner.cleanup('member', original))
+        runner.observe = lambda role: View('results', targets={'return': (66, 1050)})
+        self.assertTrue(runner.cleanup('member', retry))
+        self.assertEqual(windows['member'].clicks,
+                         list(cleanup_points(original)[:-1]) + [(100, 715), (400, 715), (66, 1050)])
 
 
 if __name__ == '__main__':
