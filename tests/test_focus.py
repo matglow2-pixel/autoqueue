@@ -45,6 +45,18 @@ class FakeDesktop:
 
 
 class FocusTests(unittest.TestCase):
+    def test_focus_or_visibility_lost_during_mouse_movement_cancels_the_tap(self):
+        commands = []
+        class Mouse:
+            def moveTo(self, **kwargs):
+                commands.append('move')
+            def mouseDown(self, **kwargs):
+                commands.append('down')
+            def mouseUp(self, **kwargs):
+                commands.append('up')
+        self.assertFalse(registered_click(Mouse(), 20, 30, ready=lambda: not commands))
+        self.assertEqual(commands, ['move'])
+
     def test_game_tap_has_a_real_hold_and_always_releases(self):
         commands = []
         class Mouse:

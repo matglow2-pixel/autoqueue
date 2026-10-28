@@ -14,6 +14,7 @@ def text(value, x, y, confidence=.99):
 
 def results_image(scale=1, liked=0):
     image = np.full((1100, 600, 3), (25, 52, 49), dtype=np.uint8)
+    image[180:280] = (205, 215, 100)
     for i, x in enumerate((100, 360, 500)):
         cv2.rectangle(image, (x - 22, 703), (x + 22, 727), (225, 225, 225), -1)
         cv2.circle(image, (x - 22, 715), 12, (225, 225, 225), -1)
@@ -47,12 +48,51 @@ class VisionTests(unittest.TestCase):
         self.title = text("Demonseal Gorge - Hard", 300, 80)
 
     def test_accept_requires_decline_and_dungeon_title(self):
+        cv2.rectangle(self.frame, (310, 925), (575, 975), (205, 216, 75), -1)
         labels = [self.title, text("Accept", 440, 950), text("Decline", 160, 950)]
         view = classify(self.frame, labels)
         self.assertEqual(view.state, "accept")
         self.assertEqual(view.targets["accept"], (440, 950))
         self.assertEqual(classify(self.frame, labels[1:]).state, "unknown")
         self.assertEqual(classify(self.frame, labels[:2]).state, "unknown")
+
+    def test_disabled_accept_is_not_an_actionable_button(self):
+        cv2.rectangle(self.frame, (30, 925), (575, 975), (225, 225, 225), -1)
+        labels = [self.title, text("Accept", 440, 950), text("Decline", 160, 950)]
+        view = classify(self.frame, labels)
+        self.assertEqual(view.state, "accepted")
+        self.assertNotIn("accept", view.targets)
+
+    def test_cached_accept_is_invalidated_when_button_becomes_disabled(self):
+        frame = self.frame.copy()
+        cv2.rectangle(frame, (30, 925), (285, 975), (225, 225, 225), -1)
+        cv2.rectangle(frame, (310, 925), (575, 975), (205, 216, 75), -1)
+        for x in (150, 440):
+            cv2.putText(frame, 'Text', (x-30, 960), cv2.FONT_HERSHEY_SIMPLEX,
+                        .6, (0, 0, 0), 2)
+        def reader(image, **kwargs):
+            # Force full-frame fallback so test labels have absolute coordinates.
+            if image.shape[0] != 1100:
+                return None, None
+            return [([[x-30, y-10], [x+30, y-10], [x+30, y+10], [x-30, y+10]], value, .99)
+                    for value, x, y in (("Demonseal Gorge", 300, 80),
+                                        ("Decline", 150, 950), ("Accept", 440, 950))], None
+        recognizer = Recognizer(reader)
+        self.assertEqual(recognizer.inspect(Image.fromarray(frame)).state, 'accept')
+        self.assertIn('default', recognizer.cache)
+        # Gray the background but preserve label pixels: text-only cache hits
+        # must not authorize another Accept click.
+        yellow = (frame[:, :, 0] == 205) & (frame[:, :, 1] == 216)
+        frame[yellow] = (225, 225, 225)
+        for (x1, y1, x2, y2), patch in recognizer.cache['default'][3]:
+            frame[y1:y2, x1:x2] = patch
+        view = recognizer.inspect(Image.fromarray(frame))
+        self.assertNotEqual(view.state, 'accept')
+
+    def test_gold_reward_badges_do_not_turn_a_queue_into_results(self):
+        frame = results_image(liked=3)
+        frame[180:280] = (25, 52, 49)  # No results rank banner on the queue.
+        self.assertIsNone(results_fast(frame))
 
     def test_accept_pair_survives_misread_dungeon_heading(self):
         frame = self.frame.copy()
@@ -234,6 +274,7 @@ class VisionTests(unittest.TestCase):
     def test_ocr_box_coordinates_are_translated_out_of_letterboxing(self):
         frame = np.zeros((1100, 1400, 3), dtype=np.uint8)
         frame[:, 400:1000] = 70
+        cv2.rectangle(frame, (710, 925), (975, 975), (205, 216, 75), -1)
         labels = [("Demonseal Gorge - Hard", (300, 80)), ("Accept", (440, 950)), ("Decline", (160, 950))]
         def reader(image, **kwargs):
             return [([[x-30, y-10], [x+30, y-10], [x+30, y+10], [x-30, y+10]], value, .99)

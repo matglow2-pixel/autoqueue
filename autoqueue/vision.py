@@ -49,7 +49,9 @@ class Recognizer:
         cached = self.cache.get(role)
         if cached and cached[0] == frame.shape and time.monotonic() - cached[1] < 10:
             _, _, view, anchors = cached
-            if all(anchor_matches(frame, box, patch) for box, patch in anchors):
+            if (all(anchor_matches(frame, box, patch) for box, patch in anchors)
+                    and (view.state != "accept" or button_color_fraction(
+                        frame, view.targets["accept"], yellow=True) > .25)):
                 return translate(view, offset)
         # Read only controls/minimap labels first. Hero art and chat no longer
         # pass through OCR on every initial button read.
@@ -198,7 +200,9 @@ def classify(frame, texts):
 
     if (accept and decline and abs(accept.center[1] - decline.center[1]) < .04 * h
             and (title or button_pair_colors(frame, decline.center, accept.center))):
-        return View("accept", targets={"accept": accept.center})
+        if button_color_fraction(frame, accept.center, yellow=True) > .25:
+            return View("accept", targets={"accept": accept.center})
+        return View("accepted", detail="Accept is disabled; waiting for the other players.")
     if title and drops:
         return results_layout(frame, drops.box[3] + int(.006 * h))
     if cancel and team:
@@ -218,22 +222,24 @@ def classify(frame, texts):
 
 def button_pair_colors(frame, left, right):
     """White left pill + yellow right pill provide context if title OCR fails."""
+    return (button_color_fraction(frame, left, yellow=False) > .25
+            and button_color_fraction(frame, right, yellow=True) > .25)
+
+
+def button_color_fraction(frame, point, yellow):
     h, w = frame.shape[:2]
-    fractions = []
-    for point, yellow in ((left, False), (right, True)):
-        x, y = point
-        area = frame[max(0, y - int(.02 * h)):min(h, y + int(.02 * h)),
-                     max(0, x - int(.12 * w)):min(w, x + int(.12 * w))]
-        if not area.size:
-            return False
-        hsv = cv2.cvtColor(area, cv2.COLOR_RGB2HSV)
-        if yellow:
-            mask = ((hsv[:, :, 0] > 15) & (hsv[:, :, 0] < 60)
-                    & (hsv[:, :, 1] > 65) & (hsv[:, :, 2] > 140))
-        else:
-            mask = (hsv[:, :, 1] < 65) & (hsv[:, :, 2] > 170)
-        fractions.append(float(mask.mean()))
-    return min(fractions) > .25
+    x, y = point
+    area = frame[max(0, y - int(.02 * h)):min(h, y + int(.02 * h)),
+                 max(0, x - int(.12 * w)):min(w, x + int(.12 * w))]
+    if not area.size:
+        return 0.0
+    hsv = cv2.cvtColor(area, cv2.COLOR_RGB2HSV)
+    if yellow:
+        mask = ((hsv[:, :, 0] > 15) & (hsv[:, :, 0] < 60)
+                & (hsv[:, :, 1] > 65) & (hsv[:, :, 2] > 140))
+    else:
+        mask = (hsv[:, :, 1] < 65) & (hsv[:, :, 2] > 170)
+    return float(mask.mean())
 
 
 def yellow_button_present(frame):
@@ -438,7 +444,8 @@ def results_fast(frame):
             continue
         if banner:
             return results_layout(frame, top + y)
-        _, ready = find_likes(frame, top + y - int(.02 * h), min_buttons=2)
-        if ready:
+        # Gold Random reward badges on the queue/menu resemble received-like
+        # pills. Only actual white controls can substitute for the rank banner.
+        if len(find_like_icons(frame, top + y)) >= 2:
             return results_layout(frame, top + y)
     return None

@@ -18,14 +18,48 @@ class EngineTests(unittest.TestCase):
         self.assertEqual((a.role, a.kind), ("leader", "match"))
         self.assertIsNone(e.step(views("queue", "queue"), 3))
 
-    def test_accepts_one_and_a_half_seconds_apart_and_does_not_repeat(self):
+    def test_accepts_one_and_a_half_seconds_apart_and_stops_after_confirmation(self):
         e = Engine()
         a = e.step(views("accept", "accept"), 0)
         self.assertEqual(a.role, "leader")
         self.assertIsNone(e.step(views("accept", "accept"), 1.49))
         a = e.step(views("accept", "accept"), 1.5)
         self.assertEqual(a.role, "member")
-        self.assertIsNone(e.step(views("accept", "accept"), 5))
+        self.assertIsNone(e.step(views("accepted", "accepted"), 5))
+
+    def test_missed_accept_is_retried_without_starving_the_other_account(self):
+        e = Engine()
+        self.assertEqual(e.step(views("accept", "accept"), 0).role, "leader")
+        self.assertEqual(e.step(views("accept", "accept"), 1.5).role, "member")
+        self.assertIsNone(e.step(views("accept", "accepted"), 2.99))
+        self.assertEqual(e.step(views("accept", "accepted"), 3).role, "leader")
+        self.assertIsNone(e.step(views("accepted", "accepted"), 6))
+
+    def test_a_blocked_leader_does_not_block_members_accept(self):
+        e = Engine()
+        self.assertEqual(e.step(views(), 0).kind, "dungeon")
+        self.assertIsNone(e.step(views("blocked", "world"), 60))
+        self.assertEqual(e.step(views("blocked", "accept"), 61).role, "member")
+        self.assertEqual(e.step(views("accept", "accepted"), 62.5).role, "leader")
+
+    def test_repeated_cycles_rearm_accept_and_retry_a_miss_in_second_cycle(self):
+        e = Engine()
+        for cycle in range(3):
+            start = cycle * 30
+            self.assertEqual(e.step(views(), start).kind, "dungeon")
+            self.assertEqual(e.step(views("menu"), start + .1).kind, "match")
+            self.assertIsNone(e.step(views("queue", "queue"), start + 1))
+            self.assertEqual(e.step(views("accept", "accept"), start + 2).role, "leader")
+            self.assertEqual(e.step(views("accept", "accept"), start + 3.5).role, "member")
+            if cycle == 1:
+                self.assertEqual(e.step(views("accept", "accepted"), start + 5).role, "leader")
+            self.assertIsNone(e.step(views("accepted", "accepted"), start + 6))
+            self.assertIsNone(e.step(views("results", "results"), start + 10))
+            self.assertEqual(e.step(views("results", "results"), start + 11).role, "member")
+            self.assertEqual(e.step(views("results", "world"), start + 12).role, "leader")
+            self.assertIsNone(e.step(views(), start + 13))
+            self.assertEqual(e.runs, cycle + 1)
+            self.assertIsNone(e.step(views(), start + 16.99))
 
     def test_declined_match_rearms_accepts_after_prompt_disappears(self):
         e = Engine()
@@ -54,7 +88,7 @@ class EngineTests(unittest.TestCase):
     def test_member_cleanup_then_leader_then_five_second_reload(self):
         e = Engine()
         self.assertIsNone(e.step(views("results", "results"), 0))
-        self.assertIsNone(e.step(views("results", "results"), 1.99))
+        self.assertIsNone(e.step(views("results", "results"), .99))
         a = e.step(views("results", "results"), 2)
         self.assertEqual((a.role, a.kind), ("member", "cleanup"))
         self.assertIsNone(e.step(views("results", "results"), 2.1))
@@ -112,7 +146,7 @@ class EngineTests(unittest.TestCase):
         unreadable = views("results", "results")
         unreadable["member"].likes_ready = False
         self.assertIsNone(e.step(unreadable, 0))
-        self.assertIsNone(e.step(views("results", "results", [(100, 700)]), 1.99))
+        self.assertIsNone(e.step(views("results", "results", [(100, 700)]), .99))
         action = e.step(views("results", "results", [(100, 700)]), 2)
         self.assertEqual(action.kind, "cleanup")
 
@@ -178,11 +212,11 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(e.step(v, 0))
         self.assertEqual(e.step(v, 2).kind, "cleanup")
 
-    def test_member_waits_two_seconds_and_leader_one_second_for_results(self):
+    def test_each_account_waits_one_second_for_results(self):
         e = Engine()
         self.assertIsNone(e.step(views("unknown", "results"), 0))
-        self.assertIsNone(e.step(views("unknown", "results"), 1.99))
-        self.assertEqual(e.step(views("unknown", "results"), 2).role, "member")
+        self.assertIsNone(e.step(views("unknown", "results"), .99))
+        self.assertEqual(e.step(views("unknown", "results"), 1).role, "member")
         self.assertIsNone(e.step(views("results", "world"), 3))
         self.assertIsNone(e.step(views("results", "world"), 3.99))
         self.assertEqual(e.step(views("results", "world"), 4).role, "leader")

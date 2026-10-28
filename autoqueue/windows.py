@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from PIL import Image
 
-from .engine import SafetyStop
+from .engine import SafetyStop, WindowUnavailable
 from .focus import activate, registered_click
 
 user32 = C.WinDLL("user32", use_last_error=True)
@@ -134,7 +134,7 @@ class Window:
         for fx, fy in ((.02, .02), (.98, .02), (.5, .5), (.02, .98), (.98, .98)):
             hit = user32.WindowFromPoint(W.POINT(x + int(width * fx), y + int(height * fy)))
             if user32.GetAncestor(hit, 2) != self.handle:
-                raise SafetyStop(f"{self.title}: another window covers the game. Keep both visible.")
+                raise WindowUnavailable(f"{self.title}: another window covers the game. Keep both visible.")
         return x, y, width, height
 
     def capture(self):
@@ -176,11 +176,16 @@ class Window:
             return False  # Focus changed after OCR. Let the runner read again.
         hit = user32.WindowFromPoint(W.POINT(x + px, y + py))
         if user32.GetAncestor(hit, 2) != self.handle:
-            raise SafetyStop("Click target is covered by another window.")
+            raise WindowUnavailable("Click target is covered by another window.")
         if not allowed():
             raise SafetyStop("Input stopped.")
-        registered_click(pyautogui, x + px, y + py, allowed)
-        return True
+        def target_ready():
+            if DesktopFocus.foreground() != self.handle or self.rect() != (x, y, w, h):
+                return False
+            hit = user32.WindowFromPoint(W.POINT(x + px, y + py))
+            return user32.GetAncestor(hit, 2) == self.handle
+
+        return registered_click(pyautogui, x + px, y + py, allowed, ready=target_ready)
 
 
 def list_windows():

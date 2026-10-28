@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from .engine import Engine, SafetyStop
+from .engine import Engine, SafetyStop, WindowUnavailable, View, RESULTS_WAIT
 from .vision import Recognizer, remember_like_patches, clicked_likes_cleared
 
 
@@ -68,13 +68,22 @@ class Runner(threading.Thread):
         self.last_images = {}
         self.like_evidence = {}
         self.clicked_likes = {}
+        self.blocked_windows = {}
 
     def send(self, kind, text):
         self.events.put((kind, text))
 
     def observe(self, role):
         window = self.targets[role]
-        image = window.capture()
+        try:
+            image = window.capture()
+        except WindowUnavailable as error:
+            self.window_unavailable(role, error)
+            return View("blocked", detail=str(error))
+        if self.blocked_windows.pop(role, None) is not None:
+            self.send("log", f"{role}: game visible again; continuing automatically.")
+            if self.engine.pending and self.engine.pending[0].role == role:
+                self.engine.on_resume(self.control.now())
         size = tuple(image.size)
         if role in self.sizes and size != self.sizes[role]:
             raise SafetyStop("Window resized. Stop and Start to use its new size.")
@@ -102,6 +111,13 @@ class Runner(threading.Thread):
             self.like_evidence.pop(role, None)
             self.clicked_likes.pop(role, None)
         return view
+
+    def window_unavailable(self, role, error):
+        message = str(error)
+        if self.blocked_windows.get(role) != message:
+            self.send("log", f"{role}: waiting for visibility: {message} Will retry automatically.")
+        self.blocked_windows[role] = message
+        self.send("status", f"Waiting for {role} window to be visible; retrying automatically.")
 
     def save_diagnostic(self, role, image=None):
         if role in self.diagnostic_saved:
@@ -143,6 +159,8 @@ class Runner(threading.Thread):
         return False
 
     def cleanup(self, role, view):
+        if view.state != "results":
+            return False
         points = self.cleanup_sequences.get(role) or cleanup_points(view)
         if points is None:
             return False
@@ -200,6 +218,7 @@ class Runner(threading.Thread):
                 continue
             if self.control.stopped.is_set():
                 break
+            action = None
             try:
                 views = {role: self.observe(role) for role in ("leader", "member")}
                 if not self.control.active():
@@ -213,7 +232,7 @@ class Runner(threading.Thread):
                 settling = []
                 for role, view in views.items():
                     if view.state == "results":
-                        wait = 2 if role == "member" else 1
+                        wait = RESULTS_WAIT
                         seen = self.engine.results_seen.get(role, self.control.now())
                         left = wait - (self.control.now() - seen)
                         if left > 0:
@@ -262,8 +281,13 @@ class Runner(threading.Thread):
                         planned.next_click = clicked_at
                         if action.kind == "accept":
                             planned.last_accept = clicked_at
-                        if action.kind == "cleanup" and action.role == "leader":
-                            planned.requeue_at = clicked_at + 5
+                            planned.accept_sent_at[action.role] = clicked_at
+                        if action.kind == "cleanup":
+                            if action.role == "member":
+                                planned.finished.add("member")
+                                planned.pending = None
+                            else:
+                                planned.requeue_at = clicked_at + 5
                         if planned.pending:
                             pending_action, deadline = planned.pending
                             if deadline is not None:
@@ -272,6 +296,11 @@ class Runner(threading.Thread):
                                 planned.match_retry_at += clicked_at - decision_time
                         self.engine = planned
                     self.send("log", f"{action.role}: {action.kind}")
+            except WindowUnavailable as error:
+                if action is not None:
+                    self.window_unavailable(action.role, error)
+                else:
+                    self.send("status", f"Waiting for visibility: {error}")
             except Exception as error:
                 if not self.control.stopped.is_set():
                     self.control.pause()

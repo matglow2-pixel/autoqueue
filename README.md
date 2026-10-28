@@ -1,4 +1,4 @@
-# Sword x Staff Autoqueue — OCR 1.7
+# Sword x Staff Autoqueue — OCR 1.8
 
 **Choose Leader, choose Member, press Start. No calibration.**
 
@@ -43,14 +43,17 @@ using the PC for something else. No ADB is required.
 2. Both accounts press **Accept**, at least **1.5 seconds apart**. A declined match
    returns to waiting for the next prompt. **Matchmaking has no timeout**: queues
    lasting a minute or longer keep running, including when queue OCR is unreadable.
+   A still-active yellow Accept button is retried if BlueStacks missed the tap.
+   Each account gets its first attempt before retries; disabled buttons are skipped.
 3. Combat runs using the game's automatic combat; this program does not control it.
-4. **Member first:** wait **two seconds after its end screen appears**, read
+4. **Member first:** wait **one second after its end screen appears**, read
    the buttons again, and click every detected white thumbs-up icon. Pause a
    fresh random **0.2–0.5 seconds between likes**. Verify the batch, then press the
    **bottom-left exit button**. Up to four actual icons are
    supported; the game's own-player counter and already-gold icons are skipped.
-5. **Leader second:** do the same, with a **one-second end-screen wait**. This
-   wait is measured from when the leader's results first appeared, so it may
+5. **Leader second:** switch as soon as the member's Exit click is sent, without
+   waiting for the member to load outside. Do the same with a **one-second end-screen
+   wait**. This wait is measured from when the leader's results first appeared, so it may
    already have elapsed while the member was handled.
 6. Wait **five seconds after the leader's Exit click** for the dungeon to reload.
    A countdown is shown in the status. Both accounts must be back outside.
@@ -75,7 +78,8 @@ temporary anchors are automatic and kept in memory; no calibration is needed.
 Screen capture copies only each game rectangle through MSS, rather than copying
 the entire desktop separately for each game. Run setup again to install MSS.
 Results use the large rank banner and Drops divider to recognize the end screen
-even if individual icon recognition fails. Only white thumb buttons with a dark
+even if individual icon recognition fails. Gold reward badges on the queue screen
+cannot substitute for the results banner. Only white thumb buttons with a dark
 icon are clicked; it does not tap avatar positions or the own-player counter.
 Thumb clicks run as a batch with the requested random spacing, without OCR
 between individual likes. The mouse moves for a random 100–180 ms toward each
@@ -103,8 +107,11 @@ reads the game screen again before sending the separate game-button click.
 This avoids the immediate "Windows blocked focusing the game" pause in the
 previous version. Input-queue attachments are released after each focus request.
 The app reads a fresh screenshot before clicking a text button. Loading, combat
-and unrecognized screens cause waiting without clicks. Failed action confirmations,
-covered windows and blocked focus cause a pause with an explanation in the log.
+and unrecognized screens cause waiting without clicks. Temporarily covered windows
+are skipped until visible again, with automatic recovery and no manual resume.
+An uncovered account can still Accept while the other is covered. No input is sent
+to covered targets; focus and visibility are checked again after mouse movement.
+Failed action confirmations and blocked focus cause a pause with an explanation in the log.
 It does not dismiss unrelated popups or change party membership automatically.
 
 ## If something does not work
@@ -137,7 +144,7 @@ python -m unittest discover -s tests -v
 ```
 
 Tests cover queue/accept sequencing, 1.5-second acceptance spacing, rapid rematches,
-actual thumb-button detection, member-first cleanup, 2s/1s end-screen waits,
+actual thumb-button detection, member-first cleanup, one-second end-screen waits,
 random like intervals, the five-second reload delay, pause timing,
 results-button detection at different sizes, already-liked icons, letterboxing,
 low-confidence/context rejection and stopping during a blocked OCR read.
@@ -158,3 +165,6 @@ Focus regressions cover delayed activation, denied requests, title-bar fallback,
 attachment cleanup, cancellation and retrying an unsent click after focus changes.
 Those fixtures are not live game captures; passing them does not establish live
 BlueStacks accuracy. The Windows desktop adapter cannot execute on Linux.
+Regression coverage includes three consecutive complete cycles, a leader Accept
+tap ignored by the game in the second cycle, visibility recovery, and accepting
+on the uncovered account while its partner is temporarily covered.

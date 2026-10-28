@@ -6,6 +6,13 @@ class SafetyStop(RuntimeError):
     pass
 
 
+class WindowUnavailable(SafetyStop):
+    """Temporary occlusion: retry observation without disabling the worker."""
+
+
+RESULTS_WAIT = 1.0
+
+
 @dataclass
 class View:
     state: str = "unknown"
@@ -26,6 +33,7 @@ class Action:
 class Engine:
     def __init__(self):
         self.accepted = set()
+        self.accept_sent_at = {}
         self.absent_since = {}
         self.last_accept = float("-inf")
         self.pending = None
@@ -42,15 +50,16 @@ class Engine:
         for role, view in views.items():
             if view.state == "results":
                 self.results_seen.setdefault(role, now)
-            elif view.state in {"world", "menu", "queue", "accept"}:
+            elif view.state in {"world", "menu", "queue", "accept", "accepted"}:
                 self.results_seen.pop(role, None)
-            if view.state == "accept":
+            if view.state in {"accept", "accepted", "blocked"}:
                 self.absent_since.pop(role, None)
             else:
                 self.absent_since.setdefault(role, now)
                 # Loading and declined matches can briefly hide the prompt.
                 if view.state in {"world", "menu", "queue", "results"} or now - self.absent_since[role] >= 3:
                     self.accepted.discard(role)
+                    self.accept_sent_at.pop(role, None)
 
         # Accept prompts are time-sensitive. They must be handled before an
         # older action's confirmation deadline, even after a very long queue.
@@ -60,10 +69,16 @@ class Engine:
             if self.results:
                 self.results = False
                 self.finished.clear()
-            for role in ("leader", "member"):
-                if (views[role].state == "accept" and role not in self.accepted
-                        and now - self.last_accept >= 1.5):
+            # Give each account its first attempt before retrying a missed tap.
+            # A sent click is not an acknowledgement from BlueStacks. Retry
+            # only a freshly detected, still-active yellow Accept button.
+            roles = sorted(("leader", "member"), key=lambda r: (
+                r in self.accepted, self.accept_sent_at.get(r, float("-inf"))))
+            for role in roles:
+                if (views[role].state == "accept" and now - self.last_accept >= 1.5
+                        and now - self.accept_sent_at.get(role, float("-inf")) >= 2):
                     self.accepted.add(role)
+                    self.accept_sent_at[role] = now
                     self.last_accept = now
                     return self.emit(Action(role, "accept"), now)
             return None
@@ -71,6 +86,8 @@ class Engine:
         if self.pending:
             action, deadline = self.pending
             view = views[action.role]
+            if view.state == "blocked":
+                return None
             expected = {
                 "dungeon": {"menu"},
                 "match": {"queue", "world", "results"},
@@ -116,7 +133,7 @@ class Engine:
             view = views[role]
             if view.state != "results":
                 return None
-            wait = 2 if role == "member" else 1
+            wait = RESULTS_WAIT
             if now - self.results_seen[role] < wait:
                 return None
             if not view.likes_ready:
@@ -169,6 +186,7 @@ class Engine:
             self.pending = action, deadline + duration if deadline is not None else None
         self.next_click += duration
         self.last_accept += duration
+        self.accept_sent_at = {r: t + duration for r, t in self.accept_sent_at.items()}
         self.match_retry_at += duration
         self.requeue_at += duration
         self.results_seen = {r: t + duration for r, t in self.results_seen.items()}

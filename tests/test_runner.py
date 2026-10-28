@@ -6,7 +6,7 @@ from unittest.mock import patch
 from PIL import Image, ImageDraw
 import numpy as np
 
-from autoqueue.engine import Action, View, SafetyStop
+from autoqueue.engine import Action, View, SafetyStop, WindowUnavailable
 from autoqueue.runner import Control, Runner, action_point, cleanup_points
 from autoqueue.vision import results_fast
 
@@ -33,6 +33,128 @@ class FakeWindow:
 
 
 class RunnerTests(unittest.TestCase):
+    def test_three_cycles_recover_a_missed_leader_accept_in_second_cycle(self):
+        states = {'leader': 'world', 'member': 'world'}
+        remaining = {}
+        clock = [0.0]
+        cycles = [0]
+        missed = [False]
+        actions = []
+        class CycleOCR:
+            def inspect(self, image, role='default'):
+                state = states[role]
+                if state == 'results':
+                    targets = {f'like_{i+1}': p for i, p in enumerate(remaining[role])}
+                    targets['return'] = (66, 1050)
+                    return View('results', likes=remaining[role].copy(), targets=targets,
+                                likes_cleared=not remaining[role])
+                return View(state, targets={'world': {'dungeon': (300, 380)},
+                                            'menu': {'match': (450, 950)},
+                                            'accept': {'accept': (450, 980)}}.get(state, {}))
+        class CycleWindow(FakeWindow):
+            def __init__(self, role):
+                super().__init__()
+                self.role = role
+
+            def capture(self):
+                clock[0] += .1
+                return super().capture()
+
+            def click(self, point, **kwargs):
+                role, state = self.role, states[self.role]
+                actions.append((cycles[0], role, state, point, clock[0]))
+                if state == 'world':
+                    states[role] = 'menu'
+                elif state == 'menu':
+                    states.update(leader='accept', member='accept')
+                    for r in states:
+                        remaining[r] = list(cleanup_points(results_view())[:-1])
+                elif state == 'accept':
+                    if cycles[0] == 1 and role == 'leader' and not missed[0]:
+                        missed[0] = True  # Sent successfully, but ignored by the game.
+                    else:
+                        states[role] = 'accepted'
+                    if all(s == 'accepted' for s in states.values()):
+                        states.update(leader='results', member='results')
+                elif state == 'results':
+                    if point == (66, 1050):
+                        states[role] = 'loading'
+                        if role == 'leader':
+                            cycles[0] += 1
+                            states.update(leader='world', member='world')
+                            if cycles[0] == 3:
+                                runner.control.stop()
+                    else:
+                        remaining[role].remove(point)
+                return True
+        windows = {r: CycleWindow(r) for r in states}
+        events = queue.SimpleQueue()
+        runner = Runner(windows, events, recognizer_factory=CycleOCR, like_delay=lambda: 0)
+        runner.control.now = lambda: clock[0]
+        runner.start()
+        runner.join(5)
+        try:
+            self.assertFalse(runner.is_alive())
+            self.assertEqual(cycles[0], 3)
+            accepts = [a for a in actions if a[2] == 'accept']
+            self.assertEqual([a[1] for a in accepts],
+                             ['leader', 'member', 'leader', 'member', 'leader', 'leader', 'member'])
+            self.assertTrue(all(b[-1] - a[-1] >= 1.5 for a, b in zip(accepts, accepts[1:])))
+            for cycle in (0, 1):
+                leader_exit = next(a[-1] for a in actions if a[:3] == (cycle, 'leader', 'results')
+                                   and a[3] == (66, 1050))
+                next_dungeon = next(a[-1] for a in actions if a[:3] == (cycle+1, 'leader', 'world'))
+                self.assertGreaterEqual(next_dungeon - leader_exit, 5)
+            messages = []
+            while not events.empty():
+                messages.append(events.get_nowait())
+            self.assertFalse(any(kind == 'paused' for kind, _ in messages))
+        finally:
+            runner.control.stop()
+            runner.join(2)
+
+    def test_covered_leader_recovers_without_pausing_or_blocking_member(self):
+        clock = [0.0]
+        clicks = []
+        states = {'leader': 'accept', 'member': 'accept'}
+        class AcceptOCR:
+            def inspect(self, image, role='default'):
+                return View(states[role], targets={'accept': (450, 980)})
+        class CoveredWindow(FakeWindow):
+            captures = 0
+            def __init__(self, role):
+                super().__init__()
+                self.role = role
+            def capture(self):
+                clock[0] += .5
+                self.captures += 1
+                if self.role == 'leader' and self.captures <= 3:
+                    raise WindowUnavailable('another window covers the game')
+                return super().capture()
+            def click(self, point, **kwargs):
+                clicks.append(self.role)
+                states[self.role] = 'accepted'
+                if len(clicks) == 2:
+                    runner.control.stop()
+                return True
+        events = queue.SimpleQueue()
+        runner = Runner({r: CoveredWindow(r) for r in states}, events, recognizer_factory=AcceptOCR)
+        runner.control.now = lambda: clock[0]
+        runner.start()
+        runner.join(3)
+        try:
+            self.assertFalse(runner.is_alive())
+            self.assertEqual(clicks, ['member', 'leader'])
+            messages = []
+            while not events.empty():
+                messages.append(events.get_nowait())
+            self.assertFalse(any(kind == 'paused' for kind, _ in messages))
+            self.assertEqual(sum('waiting for visibility' in msg for _, msg in messages), 1)
+            self.assertTrue(any('visible again' in msg for _, msg in messages))
+        finally:
+            runner.control.stop()
+            runner.join(2)
+
     def test_match_click_commits_without_a_matchmaking_deadline(self):
         class MenuOCR:
             def inspect(self, image, role="default"):
@@ -174,7 +296,7 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(runner.cleanup('member', changed_view))
         self.assertEqual(window.clicks, list(cleanup_points(results_view())))
 
-    def test_complete_cleanup_order_is_member_then_leader_with_five_second_requeue_wait(self):
+    def test_member_exit_hands_off_while_member_is_still_loading(self):
         states = {'leader': 'results', 'member': 'results'}
         clicks = []
         reads = []
@@ -185,6 +307,8 @@ class RunnerTests(unittest.TestCase):
             def inspect(self, image, role='default'):
                 reads.append(role)
                 trace.append(('read', role))
+                if states[role] == 'loading':
+                    return View('unknown')
                 if states[role] != 'results':
                     return View('world')
                 targets = {f'like_{i+1}': p for i, p in enumerate(remaining[role])}
@@ -201,7 +325,7 @@ class RunnerTests(unittest.TestCase):
                 if point in remaining[self.role]:
                     remaining[self.role].remove(point)
                 if point == (66, 1050):
-                    states[self.role] = 'world'
+                    states[self.role] = 'loading' if self.role == 'member' else 'world'
                     exit_times[self.role] = runner.control.now()
                     if self.role == 'leader':
                         runner.control.stop()
@@ -214,6 +338,7 @@ class RunnerTests(unittest.TestCase):
             self.assertFalse(runner.is_alive())
             points = cleanup_points(results_view())
             self.assertEqual(clicks, [('member', p) for p in points] + [('leader', p) for p in points])
+            self.assertEqual(states['member'], 'loading')
             for role in states:
                 indices = [i for i, event in enumerate(trace) if event[0] == 'click'
                            and event[1] == role and event[2] != (66, 1050)]

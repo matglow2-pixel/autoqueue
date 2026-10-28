@@ -5,19 +5,25 @@ import random
 from .engine import SafetyStop
 
 
-def registered_click(mouse, x, y, allowed=lambda: True, sleep=time.sleep, random_delay=None):
+def registered_click(mouse, x, y, allowed=lambda: True, sleep=time.sleep, random_delay=None,
+                     ready=lambda: True):
     """A real press/release spanning a game frame, with release guaranteed."""
     if not allowed():
         raise SafetyStop("Input stopped.")
+    if not ready():
+        return False
     choose = random_delay or random.uniform
     mouse.moveTo(x=x, y=y, duration=choose(.10, .18), _pause=False)
     if not allowed():
         raise SafetyStop("Input stopped.")
+    if not ready():
+        return False
     mouse.mouseDown(x=x, y=y, _pause=False)
     try:
         sleep(choose(.04, .08))
     finally:
         mouse.mouseUp(x=x, y=y, _pause=False)
+    return True
 
 
 def request_foreground(api, handle):
