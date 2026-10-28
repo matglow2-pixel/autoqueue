@@ -4,7 +4,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from autoqueue.vision import Recognizer, Text, classify, find_likes, find_return, results_fast
+from autoqueue.vision import (Recognizer, Text, classify, find_likes, find_return,
+                             results_fast, remember_like_patches, clicked_likes_cleared)
 
 
 def text(value, x, y, confidence=.99):
@@ -128,27 +129,51 @@ class VisionTests(unittest.TestCase):
         cv2.circle(image, (75, 1050), 20, (240, 240, 240), -1)
         self.assertIsNone(find_return(image))
 
-    def test_clicked_gold_thumbs_are_not_liked_twice(self):
+    def test_incoming_gold_indicators_are_not_click_targets(self):
         for liked in range(4):
             likes, ready = find_likes(results_image(liked=liked), 760)
             self.assertTrue(ready)
             self.assertEqual(len(likes), 3 - liked)
 
-    def test_zero_detected_thumbs_without_gold_confirmation_never_allows_exit(self):
+    def test_zero_detected_thumbs_without_click_history_never_allows_exit(self):
         view = classify(self.frame, [self.title, text("Drops", 70, 760)])
         self.assertEqual(view.state, "results")
         self.assertFalse(view.likes_ready)
         self.assertEqual(view.likes, [])
         self.assertEqual(list(view.targets), ['return'])
 
-    def test_dark_gold_liked_row_still_allows_exit_without_ocr(self):
+    def test_incoming_gold_counts_do_not_confirm_outgoing_likes(self):
         for liked in range(4):
             with self.subTest(liked=liked):
                 view = results_fast(results_image(liked=liked))
                 self.assertIsNotNone(view)
-                self.assertTrue(view.likes_ready)
+                self.assertEqual(view.likes_ready, liked < 3)
                 self.assertEqual(len(view.likes), 3 - liked)
                 self.assertIn("return", view.targets)
+
+    def test_outgoing_buttons_disappearing_confirms_likes_with_any_incoming_count(self):
+        original = Image.fromarray(results_image())
+        points = [(100, 715), (360, 715), (500, 715)]
+        evidence = {}
+        remember_like_patches(original, points, evidence)
+        self.assertFalse(clicked_likes_cleared(original, evidence, set(points)))
+        for incoming in (0, 2, 3):
+            with self.subTest(incoming=incoming):
+                after = results_image(liked=incoming)
+                for i, x in enumerate((100, 360, 500)):
+                    if i >= incoming:
+                        after[695:735, x-36:x+36] = (25, 52, 49)
+                image = Image.fromarray(after)
+                self.assertTrue(clicked_likes_cleared(image, evidence, set(points)))
+                self.assertFalse(clicked_likes_cleared(image, evidence, set()))
+                # An app without history must not use received likes as proof.
+                self.assertFalse(clicked_likes_cleared(image, {}, set(points)))
+
+    def test_a_remaining_white_button_blocks_exit_even_if_two_incoming_likes_show(self):
+        points = [(100, 715), (360, 715), (500, 715)]
+        evidence = {}
+        remember_like_patches(Image.fromarray(results_image()), points, evidence)
+        self.assertFalse(clicked_likes_cleared(Image.fromarray(results_image(liked=2)), evidence, set(points)))
 
     def test_results_icons_use_no_ocr_and_no_manual_templates(self):
         def forbidden_reader(*args, **kwargs):

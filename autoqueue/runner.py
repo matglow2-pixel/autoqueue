@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 
 from .engine import Engine, SafetyStop
-from .vision import Recognizer
+from .vision import Recognizer, remember_like_patches, clicked_likes_cleared
 
 
 class Control:
@@ -65,6 +65,9 @@ class Runner(threading.Thread):
         self.cleanup_retries = {}
         self.missing_likes_since = {}
         self.diagnostic_saved = set()
+        self.last_images = {}
+        self.like_evidence = {}
+        self.clicked_likes = {}
 
     def send(self, kind, text):
         self.events.put((kind, text))
@@ -76,7 +79,14 @@ class Runner(threading.Thread):
         if role in self.sizes and size != self.sizes[role]:
             raise SafetyStop("Window resized. Stop and Start to use its new size.")
         self.sizes[role] = size
+        self.last_images[role] = image
         view = self.recognizer.inspect(image, role=role)
+        if view.state == "results":
+            view.likes_cleared = view.likes_cleared or clicked_likes_cleared(
+                image, self.like_evidence.get(role, {}), self.clicked_likes.get(role, set()))
+            if view.likes_cleared and not view.likes:
+                view.likes_ready = True
+                view.detail = "Clicked white buttons disappeared; Exit ready."
         if view.state == "results" and not view.likes_ready:
             self.missing_likes_since.setdefault(role, self.control.now())
             if self.control.now() - self.missing_likes_since[role] >= 3:
@@ -89,6 +99,8 @@ class Runner(threading.Thread):
             self.verification_since.pop(role, None)
             self.cleanup_retries.pop(role, None)
             self.diagnostic_saved.discard(role)
+            self.like_evidence.pop(role, None)
+            self.clicked_likes.pop(role, None)
         return view
 
     def save_diagnostic(self, role, image=None):
@@ -110,8 +122,8 @@ class Runner(threading.Thread):
         fresh = self.observe(role)
         if not self.control.active() or fresh.state != "results":
             return False
-        if fresh.likes_ready and not fresh.likes:
-            return True  # Three gold teammate buttons positively confirm completion.
+        if fresh.likes_cleared and not fresh.likes:
+            return True  # The white buttons we clicked disappeared. Incoming likes are irrelevant.
         now = self.control.now()
         self.verification_since.setdefault(role, now)
         elapsed = now - self.verification_since[role]
@@ -137,6 +149,9 @@ class Runner(threading.Thread):
         self.cleanup_sequences[role] = points
         index = self.cleanup_progress.get(role, 0)
         if index == 0:
+            image = self.last_images.get(role)
+            if image is not None:
+                remember_like_patches(image, points[:-1], self.like_evidence.setdefault(role, {}))
             self.send("log", f"{role}: clicking {len(points) - 1} thumbs-up icons, then Exit.")
         while index < len(points):
             if not self.control.active():
@@ -153,6 +168,8 @@ class Runner(threading.Thread):
                     return False
                 index += 1
                 self.cleanup_progress[role] = index
+                if index < len(points):
+                    self.clicked_likes.setdefault(role, set()).add(points[index - 1])
             # Let Windows dispatch this tap, without another screenshot/OCR or
             # per-like acknowledgement. Pause/Stop can interrupt the sequence.
             if index < len(points):

@@ -325,11 +325,9 @@ def results_layout(frame, divider_y):
     points = find_like_icons(frame, divider_y)
     targets = {f"like_{i + 1}": p for i, p in enumerate(points)}
     targets["return"] = find_return(frame) or (round(.11 * w), round(.955 * h))
-    complete = liked_row_complete(frame, divider_y)
-    ready = bool(points) or complete
+    ready = bool(points)
     detail = (f"{len(points)} thumbs-up icons; verify likes before Exit." if points else
-              "All teammate thumbs are gold; Exit ready." if complete else
-              "No thumbs recognized yet; keeping results open.")
+              "No white thumbs detected; waiting for clicked-button confirmation.")
     return View("results", points, targets, ready, detail)
 
 
@@ -373,28 +371,45 @@ def find_like_icons(frame, divider_y):
     return sorted(p for _, p in sorted(row, reverse=True)[:4])
 
 
-def liked_row_complete(frame, divider_y):
-    """Zero white matches is only completion when three gold pills are visible."""
-    h, w = frame.shape[:2]
-    top, bottom = max(0, int(divider_y - .22 * h)), max(0, int(divider_y - .008 * h))
-    if bottom <= top:
-        return False
-    hsv = cv2.cvtColor(frame[top:bottom], cv2.COLOR_RGB2HSV)
-    gold = ((hsv[:, :, 0] >= 15) & (hsv[:, :, 0] <= 55)
-            & (hsv[:, :, 1] > 40) & (hsv[:, :, 2] > 60)).astype(np.uint8) * 255
-    gold = cv2.morphologyEx(gold, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    contours, _ = cv2.findContours(gold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    centers = []
-    for contour in contours:
-        x, y, bw, bh = cv2.boundingRect(contour)
-        if not (.055 * w < bw < .20 * w and .012 * h < bh < .065 * h
-                and 1.6 < bw / bh < 4.5 and cv2.contourArea(contour) / (bw * bh) > .55):
+def remember_like_patches(image, points, evidence):
+    """Keep the actual white-button areas seen before sending outgoing likes."""
+    full = np.asarray(image.convert("RGB"))
+    frame, _ = game_frame(full)
+    width = frame.shape[1] if frame is not None else min(full.shape[1], full.shape[0])
+    dx, dy = max(4, round(.045 * width)), max(4, round(.027 * width))
+    for point in points:
+        if point in evidence:
             continue
-        icon = hsv[y + bh // 5:y + 4 * bh // 5, x + bw // 4:x + 3 * bw // 4]
-        if np.mean((icon[:, :, 1] > 80) & (icon[:, :, 2] > 125)) > .08:
-            centers.append((x + bw // 2, top + y + bh // 2))
-    return any(sum(abs(y - other_y) < .018 * h for _, other_y in centers) >= 3
-               for _, y in centers)
+        x, y = point
+        box = (max(0, x-dx), max(0, y-dy), min(full.shape[1], x+dx), min(full.shape[0], y+dy))
+        x1, y1, x2, y2 = box
+        patch = full[y1:y2, x1:x2].copy()
+        if patch.size:
+            evidence[point] = (box, patch)
+
+
+def clicked_likes_cleared(image, evidence, clicked):
+    """Each successfully clicked white button must disappear from its own area.
+
+    Incoming gold indicators are never counted as sent likes or as completion.
+    A detector returning zero is insufficient if the original white pills remain.
+    """
+    if not clicked or any(p not in evidence for p in clicked):
+        return False
+    full = np.asarray(image.convert("RGB"))
+    for point in clicked:
+        (x1, y1, x2, y2), before = evidence[point]
+        after = full[y1:y2, x1:x2]
+        if before.shape != after.shape or not after.size:
+            return False
+        original = cv2.cvtColor(before, cv2.COLOR_RGB2HSV)
+        current = cv2.cvtColor(after, cv2.COLOR_RGB2HSV)
+        old_white = np.mean((original[:, :, 1] < 95) & (original[:, :, 2] > 125))
+        new_white = np.mean((current[:, :, 1] < 95) & (current[:, :, 2] > 125))
+        changed = np.abs(before.astype(np.int16) - after.astype(np.int16)).mean()
+        if old_white < .2 or new_white > old_white * .45 or changed < 18:
+            return False
+    return True
 
 
 def rank_banner(frame):

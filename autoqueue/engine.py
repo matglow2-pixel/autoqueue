@@ -13,6 +13,7 @@ class View:
     targets: dict[str, tuple[int, int]] = field(default_factory=dict)
     likes_ready: bool = True
     detail: str = ""
+    likes_cleared: bool = False
 
 
 @dataclass(frozen=True)

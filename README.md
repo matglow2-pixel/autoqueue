@@ -1,4 +1,4 @@
-# Sword x Staff Autoqueue — OCR 1.6
+# Sword x Staff Autoqueue — OCR 1.7
 
 **Choose Leader, choose Member, press Start. No calibration.**
 
@@ -27,6 +27,8 @@ No saved reference images or previous calibration settings are used.
 - **F8:** pause/resume.
 - **F9:** stop and reset the session.
 - After Stop, put both accounts outside the dungeon before starting again.
+- When updating from a stuck results screen, exit those old results manually
+  once and start a fresh run outside; the new app cannot recover old click history.
 
 Both games must stay visible, unlocked and in **English**, with the portrait
 layout shown in the screenshots. You can move the windows; after resizing one,
@@ -80,9 +82,11 @@ between individual likes. The mouse moves for a random 100–180 ms toward each
 target, and presses last a random 40–80 ms so BlueStacks can register the down/up
 events. One check after the batch confirms likes before Exit.
 Still-white thumbs are retried up to twice; uncertain detection keeps results
-open instead of exiting. Zero detected thumbs is only completion when three gold
-teammate buttons positively confirm the row is done. Buttons are searched over
-a wider row area with more tolerance for dimmer member-window rendering.
+open instead of exiting. The app remembers the white button areas before clicking
+and checks that each successfully clicked white control disappears. Gold thumbs
+show **received likes** and have no role in confirming the account's outgoing
+likes. An empty initial scan without click history cannot authorize Exit.
+Buttons are searched over a wider row area with more tolerance for dimmer rendering.
 Pause/Stop can interrupt the sequence, and a
 resumed sequence remembers completed clicks. The exit glyph is used when found;
 otherwise the center of the black bottom-left exit button in the supplied layout
@@ -144,7 +148,10 @@ An integration test runs the actual bundled OCR models on generated button scree
 The runner tests record both accounts' exact click order, verify no OCR between
 individual likes, retry unregistered likes before Exit, and check interrupted
 cleanup resumes without repeating completed clicks. Unknown zero scans are
-tested to prohibit Exit, with positive gold-row confirmation tested separately.
+tested to prohibit Exit. Removal of the clicked buttons is tested with zero, two,
+or three incoming gold indicators, which are deliberately irrelevant to completion.
+A generated-screen replay removes all outgoing buttons while keeping two incoming
+indicators, then verifies Exit and handoff through both accounts.
 It verifies that repeated unchanged screens reuse automatically read labels
 without additional OCR inference, and that changed screens invalidate those labels.
 Focus regressions cover delayed activation, denied requests, title-bar fallback,

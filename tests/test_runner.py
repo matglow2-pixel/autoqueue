@@ -3,10 +3,12 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageDraw
+import numpy as np
 
 from autoqueue.engine import Action, View, SafetyStop
 from autoqueue.runner import Control, Runner, action_point, cleanup_points
+from autoqueue.vision import results_fast
 
 
 def results_view():
@@ -131,7 +133,7 @@ class RunnerTests(unittest.TestCase):
         windows = {'leader': FakeWindow(), 'member': FakeWindow()}
         runner = Runner(windows, queue.SimpleQueue(), like_delay=lambda: 0)
         runner.sizes['member'] = (600, 1100)
-        runner.observe = lambda role: View('results', targets={'return': (66, 1050)})
+        runner.observe = lambda role: View('results', targets={'return': (66, 1050)}, likes_cleared=True)
         view = results_view()
         self.assertTrue(runner.cleanup('member', view))
         self.assertEqual(windows['member'].clicks, list(cleanup_points(view)))
@@ -168,7 +170,7 @@ class RunnerTests(unittest.TestCase):
         # Already-liked icons can disappear from a later screenshot. Continue
         # the original authorized sequence without double-clicking prior icons.
         changed_view = View('results', targets={'like_1': (400, 715), 'return': (66, 1050)})
-        runner.observe = lambda role: View('results', targets={'return': (66, 1050)})
+        runner.observe = lambda role: View('results', targets={'return': (66, 1050)}, likes_cleared=True)
         self.assertTrue(runner.cleanup('member', changed_view))
         self.assertEqual(window.clicks, list(cleanup_points(results_view())))
 
@@ -187,7 +189,7 @@ class RunnerTests(unittest.TestCase):
                     return View('world')
                 targets = {f'like_{i+1}': p for i, p in enumerate(remaining[role])}
                 targets['return'] = (66, 1050)
-                return View('results', likes=remaining[role].copy(), targets=targets)
+                return View('results', likes=remaining[role].copy(), targets=targets, likes_cleared=not remaining[role])
         class ResultsWindow(FakeWindow):
             def __init__(self, role):
                 super().__init__()
@@ -224,13 +226,65 @@ class RunnerTests(unittest.TestCase):
     def test_random_pause_between_each_like_is_in_requested_range(self):
         runner = Runner({'leader': FakeWindow(), 'member': FakeWindow()}, queue.SimpleQueue())
         runner.sizes['member'] = (600, 1100)
-        runner.observe = lambda role: View('results', targets={'return': (66, 1050)})
+        runner.observe = lambda role: View('results', targets={'return': (66, 1050)}, likes_cleared=True)
         with patch('autoqueue.runner.random.uniform', return_value=.35) as random_delay:
             with patch.object(runner.control.stopped, 'wait', return_value=False) as wait:
                 self.assertTrue(runner.cleanup('member', results_view()))
         self.assertEqual(random_delay.call_count, 3)
         self.assertTrue(all(c.args == (.2, .5) for c in random_delay.call_args_list))
         self.assertEqual([c.args[0] for c in wait.call_args_list], [.35, .35, .35, .01])
+
+    def test_disappearing_outgoing_buttons_exit_and_switch_accounts_despite_two_incoming_likes(self):
+        states = {'member': 'results', 'leader': 'results'}
+        images = {}
+        for role in states:
+            image = Image.new('RGB', (600, 1100), (25, 52, 49))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((0, 180, 599, 280), fill=(205, 215, 100))
+            draw.line((20, 780, 580, 780), fill=(170, 170, 170), width=2)
+            for x in (100, 360, 500):
+                draw.rounded_rectangle((x-34, 700, x+34, 730), radius=15, fill=(225, 225, 225))
+                draw.rectangle((x-8, 708, x+8, 722), fill=(20, 20, 20))
+            images[role] = image
+        clicks = []
+        class ScreenReader:
+            def inspect(self, image, role='default'):
+                return results_fast(np.asarray(image)) if states[role] == 'results' else View('world')
+        class Window(FakeWindow):
+            def __init__(self, role):
+                super().__init__()
+                self.role = role
+            def capture(self):
+                return images[self.role].copy()
+            def click(self, point, **kwargs):
+                clicks.append((self.role, point))
+                x, y = point
+                if y > 1000:
+                    states[self.role] = 'world'
+                    if self.role == 'leader':
+                        runner.control.stop()
+                    return True
+                # Sending a like removes its white button. Two independent
+                # incoming-like indicators remain, reproducing the screenshot.
+                draw = ImageDraw.Draw(images[self.role])
+                draw.rectangle((x-36, y-20, x+36, y+20), fill=(25, 52, 49))
+                if x in (100, 500):
+                    draw.rounded_rectangle((x-34, y-15, x+34, y+15), radius=15,
+                                           fill=(25, 40, 38), outline=(90, 95, 45), width=2)
+                    draw.rectangle((x-8, y-7, x+8, y+7), fill=(210, 220, 90))
+                return True
+        runner = Runner({r: Window(r) for r in states}, queue.SimpleQueue(),
+                        recognizer_factory=ScreenReader, like_delay=lambda: 0)
+        runner.start()
+        runner.join(4)
+        try:
+            self.assertFalse(runner.is_alive())
+            sequence = [(100, 715), (360, 715), (500, 715), (66, 1050)]
+            self.assertEqual(clicks, [('member', p) for p in sequence] + [('leader', p) for p in sequence])
+            self.assertEqual(states, {'member': 'world', 'leader': 'world'})
+        finally:
+            runner.control.stop()
+            runner.join(2)
 
     def test_zero_uncertain_scan_never_sends_exit(self):
         window = FakeWindow()
@@ -266,7 +320,7 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn((66, 1050), windows['member'].clicks)
         with patch.object(runner.control, 'now', return_value=.31):
             self.assertFalse(runner.cleanup('member', original))
-        runner.observe = lambda role: View('results', targets={'return': (66, 1050)})
+        runner.observe = lambda role: View('results', targets={'return': (66, 1050)}, likes_cleared=True)
         self.assertTrue(runner.cleanup('member', retry))
         self.assertEqual(windows['member'].clicks,
                          list(cleanup_points(original)[:-1]) + [(100, 715), (400, 715), (66, 1050)])
