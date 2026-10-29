@@ -19,7 +19,7 @@ class App:
         self.windows = []
         self.selectors = {}
         self.hotkeys = Hotkeys()
-        root.title("Sword x Staff Autoqueue — OCR 1.8")
+        root.title("Sword x Staff Autoqueue — OCR 1.9")
         root.geometry("760x440")
         ttk.Label(root, text="Sword x Staff Autoqueue", font=("Segoe UI", 17)).pack(pady=12)
         ttk.Label(root, text="Select the two game windows, then Start. Buttons are detected automatically.").pack()
@@ -85,9 +85,8 @@ class App:
                 self.runner.control.pause()
                 self.status.configure(text="Paused. F8 resumes; F9 stops.")
                 return
-            self.root.iconify()
             self.start_pending = True
-            self.root.after(400, self.begin)
+            self.root.after_idle(self.begin)
             return
         # A stopped worker may still be completing OCR. Do not overlap workers.
         if self.runner:
@@ -102,9 +101,8 @@ class App:
             messagebox.showinfo("Choose windows", str(error))
             return
         self.pending_targets = targets
-        self.root.iconify()
         self.start_pending = True
-        self.root.after(400, self.begin)
+        self.root.after_idle(self.begin)
 
     def begin(self):
         if not self.start_pending:

@@ -29,10 +29,8 @@ class OCRIntegrationTests(unittest.TestCase):
                 def label(value, xy, size=26, fill='white'):
                     draw.text(xy, value, font=ImageFont.truetype(str(font_path), size), fill=fill)
                 if state == 'world':
-                    label('Demonseal Gorge', (430, 260), 15)
                     label('Explore', (420, 1050), 20)
                 else:
-                    label('Demonseal Gorge - Hard', (50, 70), 28)
                     draw.rounded_rectangle((30, 930, 285, 995), radius=24, fill=(225, 225, 225))
                     draw.rounded_rectangle((310, 930, 575, 995), radius=24,
                                            fill=(225, 225, 225) if state == 'queue' else (205, 216, 75))
@@ -51,6 +49,9 @@ class OCRIntegrationTests(unittest.TestCase):
                     self.assertTrue(310 < x < 575 and 930 < y < 995)
                 # Fresh screenshots with unchanged UI labels should validate
                 # the automatic anchors, without repeating model inference.
+                # A different dungeon heading/artwork is irrelevant as well.
+                draw.rectangle((0, 0, 599, 400), fill=(70, 45, 85))
+                label('Another Dungeon', (50, 70), 28)
                 for _ in range(10):
                     fresh = recognizer.inspect(image.copy())
                     self.assertEqual(fresh.state, state)

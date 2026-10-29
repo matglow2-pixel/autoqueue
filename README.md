@@ -1,11 +1,13 @@
-# Sword x Staff Autoqueue — OCR 1.8
+# Sword x Staff Autoqueue — OCR 1.9
 
 **Choose Leader, choose Member, press Start. No calibration.**
 
 The assistant reads Match, Accept, Cancel, Matchmaking and Drops from the screen
 using a bundled, offline OCR engine. It detects the actual white thumbs-up
-buttons and clicks the bottom-left exit area. It uses the entrance area from the
-Demonseal Gorge layout shown in your screenshots to reopen the dungeon.
+buttons and clicks the bottom-left exit area. It supports dungeons sharing the
+game layout shown in your screenshots. The leader opens the gate at your marked
+point, about **50.5% across and 34% down** the portrait game viewport, well above
+the central character. Dungeon names, minimap labels and cave artwork are not scanned.
 
 ## Download and run on Windows 11
 
@@ -16,9 +18,11 @@ Demonseal Gorge layout shown in your screenshots to reopen the dungeon.
    configure separately. Python 3.12 (64-bit), including `tcl/tk and IDLE`, is required.
 3. Double-click **run.bat**.
 4. Open both BlueStacks game windows side by side. Put both accounts in the same
-   party outside Demonseal Gorge. Set the desired difficulty in-game beforehand.
+   party directly in front of your chosen dungeon's gate, with the character in
+   the usual central position. Set the desired difficulty in-game beforehand.
 5. Select the window belonging to the in-game party **Leader**, then the other
-   window as **Member**. Press **Start** or **F8**. The app minimizes itself.
+   window as **Member**. Press **Start** or **F8**. The control window stays open
+   when starting or resuming; place it beside the games so all three stay visible.
 
 The window ID after each title distinguishes players with identical names.
 Default selections are suggestions; opening order does not decide leadership.
@@ -63,7 +67,7 @@ using the PC for something else. No ADB is required.
 OCR runs in the background so the control window and stop key remain responsive.
 Accept prompts take priority over all pending click-confirmation checks. The app
 can recognize the paired white Decline/yellow Accept buttons even when the dungeon
-heading is misread. Small control/minimap crops are read first; a full-frame OCR
+heading is missing. Small control crops are read first; a full-frame OCR
 pass is only a fallback. Cancel and
 Matchmaking detection do not require a correctly read dungeon name. If Match is
 still positively visible, failed clicks get up to three attempts; an unknown or
@@ -131,8 +135,10 @@ It does not dismiss unrelated popups or change party membership automatically.
   both BlueStacks and Autoqueue normally, or at the same administrator permission
   level if you intentionally run BlueStacks as administrator.
 
-Watch the first complete cycle on your PC. The detection is designed for the
-Demonseal Gorge UI in the supplied screenshots. Real game fonts, animations,
+Watch the first complete cycle on your PC. Dungeon names and entrance artwork
+do not affect the shared UI detection. The entrance position uses the gate layout
+you supplied rather than tracking the character; start while standing at the gate.
+Real game fonts, animations,
 Windows focus/input and BlueStacks behavior still need validation on your PC.
 OCR can misread text, so the app checks context and avoids clicking unrelated
 Match/Accept text in chat. Screenshots are processed locally and not uploaded.
@@ -168,3 +174,6 @@ BlueStacks accuracy. The Windows desktop adapter cannot execute on Linux.
 Regression coverage includes three consecutive complete cycles, a leader Accept
 tap ignored by the game in the second cycle, visibility recovery, and accepting
 on the uncovered account while its partner is temporarily covered.
+Dungeon-independent tests cover missing and different headings, the marked point
+at several sizes and within letterboxing, and rejection of Explore text in chat.
+The real OCR models also read the common controls on screens with no dungeon name.

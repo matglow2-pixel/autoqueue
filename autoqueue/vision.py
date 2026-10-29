@@ -9,6 +9,11 @@ import numpy as np
 from .engine import View
 
 
+# The user's marked entrance point, relative to the portrait game viewport.
+# It stays well above the central character; no artwork/head detection is used.
+ENTRANCE_POSITION = (.505, .34)
+
+
 @dataclass(frozen=True)
 class Text:
     value: str
@@ -53,7 +58,7 @@ class Recognizer:
                     and (view.state != "accept" or button_color_fraction(
                         frame, view.targets["accept"], yellow=True) > .25)):
                 return translate(view, offset)
-        # Read only controls/minimap labels first. Hero art and chat no longer
+        # Read only controls first. Hero art and chat no longer
         # pass through OCR on every initial button read.
         atlas, regions = control_atlas(frame)
         result, _ = self.reader(cv2.cvtColor(atlas, cv2.COLOR_RGB2BGR), use_cls=False)
@@ -82,7 +87,7 @@ class Recognizer:
         self.cache.pop(role, None)
         if view.state in {"world", "menu", "queue", "accept"}:
             anchors = cache_anchors(frame, view.state, texts)
-            if len(anchors) >= 2 or (view.state == "queue" and anchors):
+            if len(anchors) >= 2 or (view.state in {"world", "queue"} and anchors):
                 self.cache[role] = (frame.shape, time.monotonic(), view, anchors)
         return translate(view, offset)
 
@@ -93,7 +98,6 @@ def control_atlas(frame):
         boxes = [(0, int(.65 * h), w, h)]
     else:
         boxes = [(0, int(.72 * h), w, h),
-                 (int(.64 * w), int(.16 * h), w, int(.36 * h)),
                  (0, int(.22 * h), int(.34 * w), int(.45 * h))]
     height = sum(y2 - y1 + 12 for _, y1, _, y2 in boxes)
     atlas = np.zeros((height, w, 3), np.uint8)
@@ -125,8 +129,8 @@ def translate(view, offset):
 
 def cache_anchors(frame, state, texts):
     """Keep only automatically read UI labels, never animated game artwork."""
-    keys = {"world": ("demonsea", "explore"), "menu": ("match", "team"),
-            "queue": ("cancel", "team", "matchmaking", "demonsea"),
+    keys = {"world": ("explore",), "menu": ("match", "team"),
+            "queue": ("cancel", "team", "matchmaking"),
             "accept": ("accept", "decline")}[state]
     h, w = frame.shape[:2]
     anchors = []
@@ -135,8 +139,7 @@ def cache_anchors(frame, state, texts):
             continue
         # Mirror the spatial guards used for OCR scene classification.
         x, y = text.center
-        valid = (("demonsea" in text.key and y < .36 * h)
-                 or ("explore" in text.key and y > .85 * h)
+        valid = (is_explore_control(text, w, h)
                  or ("matchmaking" in text.key and x < .35 * w and y < .5 * h)
                  or (text.key in {"match", "cancel", "accept", "decline"} and y > .65 * h)
                  or ("team" in text.key and x < .6 * w and y > .65 * h))
@@ -189,7 +192,6 @@ def classify(frame, texts):
                 and y1 * h < t.center[1] < y2 * h]
         return hits[0] if len(hits) == 1 else None
 
-    title = find("demonsea", (0, 0, 1, .36), contains=True)
     accept = find("accept", (.4, .65, 1, .99))
     decline = find("decline", (0, .65, .6, .99))
     drops = find("drops", (0, .45, .5, .88))
@@ -199,29 +201,37 @@ def classify(frame, texts):
     matchmaking = find("matchmaking", (0, 0, .35, .5), contains=True)
 
     if (accept and decline and abs(accept.center[1] - decline.center[1]) < .04 * h
-            and (title or button_pair_colors(frame, decline.center, accept.center))):
-        if button_color_fraction(frame, accept.center, yellow=True) > .25:
+            and button_color_fraction(frame, decline.center, yellow=False) > .25):
+        if button_pair_colors(frame, decline.center, accept.center):
             return View("accept", targets={"accept": accept.center})
-        return View("accepted", detail="Accept is disabled; waiting for the other players.")
-    if title and drops:
-        return results_layout(frame, drops.box[3] + int(.006 * h))
+        if button_color_fraction(frame, accept.center, yellow=False) > .25:
+            return View("accepted", detail="Accept is disabled; waiting for the other players.")
+    if drops:
+        divider_y = drops.box[3] + int(.006 * h)
+        if rank_banner(frame) or find_like_icons(frame, divider_y):
+            return results_layout(frame, divider_y)
     if cancel and team:
         return View("queue", detail="Waiting for a match; Accept is monitored.")
-    if match and team and (title or button_pair_colors(frame, team.center, match.center)):
+    if (match and team and abs(match.center[1] - team.center[1]) < .04 * h
+            and button_pair_colors(frame, team.center, match.center)):
         return View("menu", targets={"match": match.center})
     if matchmaking:
         return View("queue", detail="Waiting for a match; Accept is monitored.")
-    # Restrict the world label to the minimap and require its bottom action too.
-    explore = next((t for t in words if "explore" in t.key and t.center[1] > .85 * h), None)
-    if title and title.center[0] > .55 * w and explore:
-        # The dungeon has no text label in-world. Its large entrance occupies
-        # this relative area in the supplied Demonseal Gorge layout.
-        return View("world", targets={"dungeon": (round(.52 * w), round(.35 * h))})
+    # The shared Explore control identifies the outside HUD. Dungeon names and
+    # entrance artwork are irrelevant: opening always uses the marked point.
+    if any(is_explore_control(t, w, h) for t in words):
+        x, y = ENTRANCE_POSITION
+        return View("world", targets={"dungeon": (round(x * w), round(y * h))})
     return View(detail="Waiting for the next game screen (combat/loading is normal).")
 
 
+def is_explore_control(text, width, height):
+    return (text.key.startswith("explore") and text.center[0] > .65 * width
+            and text.center[1] > .90 * height)
+
+
 def button_pair_colors(frame, left, right):
-    """White left pill + yellow right pill provide context if title OCR fails."""
+    """Recognize the common white-left/yellow-right action button pair."""
     return (button_color_fraction(frame, left, yellow=False) > .25
             and button_color_fraction(frame, right, yellow=True) > .25)
 

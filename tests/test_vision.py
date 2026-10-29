@@ -47,13 +47,14 @@ class VisionTests(unittest.TestCase):
         self.frame = np.zeros((1100, 600, 3), dtype=np.uint8)
         self.title = text("Demonseal Gorge - Hard", 300, 80)
 
-    def test_accept_requires_decline_and_dungeon_title(self):
+    def test_accept_requires_the_shared_button_pair_without_a_dungeon_title(self):
+        cv2.rectangle(self.frame, (30, 925), (285, 975), (225, 225, 225), -1)
         cv2.rectangle(self.frame, (310, 925), (575, 975), (205, 216, 75), -1)
         labels = [self.title, text("Accept", 440, 950), text("Decline", 160, 950)]
         view = classify(self.frame, labels)
         self.assertEqual(view.state, "accept")
         self.assertEqual(view.targets["accept"], (440, 950))
-        self.assertEqual(classify(self.frame, labels[1:]).state, "unknown")
+        self.assertEqual(classify(self.frame, labels[1:]).state, "accept")
         self.assertEqual(classify(self.frame, labels[:2]).state, "unknown")
 
     def test_disabled_accept_is_not_an_actionable_button(self):
@@ -126,6 +127,8 @@ class VisionTests(unittest.TestCase):
         self.assertEqual(view.targets["accept"], (440, 950))
 
     def test_match_and_cancel_are_not_confused_with_matchmaking(self):
+        cv2.rectangle(self.frame, (30, 915), (285, 965), (225, 225, 225), -1)
+        cv2.rectangle(self.frame, (310, 915), (575, 965), (205, 216, 75), -1)
         labels = [self.title, text("Team 2/4", 150, 940), text("Match", 440, 940)]
         self.assertEqual(classify(self.frame, labels).targets["match"], (440, 940))
         labels[-1] = text("Cancel", 440, 940)
@@ -139,11 +142,56 @@ class VisionTests(unittest.TestCase):
         labels[-1] = text("Match", 440, 500)
         self.assertEqual(classify(self.frame, labels).state, "unknown")
 
-    def test_world_does_not_misread_combat_title_as_dungeon_entrance(self):
-        labels = [text("Demonseal Gorge", 510, 280), text("Explore", 430, 1070)]
-        self.assertEqual(classify(self.frame, labels).targets["dungeon"], (312, 385))
-        labels[0] = self.title
-        self.assertEqual(classify(self.frame, labels).state, "unknown")
+    def test_world_uses_the_marked_point_with_any_or_no_dungeon_name(self):
+        for name in (None, "Demonseal Gorge", "Another Dungeon"):
+            with self.subTest(name=name):
+                labels = [text("Explore", 430, 1070)]
+                if name:
+                    labels.append(text(name, 510, 280))
+                self.assertEqual(classify(self.frame, labels).targets["dungeon"], (303, 374))
+
+    def test_dungeon_title_and_chat_text_cannot_authorize_an_entrance_click(self):
+        for labels in ([self.title], [self.title, text("Explore", 200, 950)],
+                       [text("Explore", 430, 950)], [text("Explore", 430, 1070, .2)]):
+            with self.subTest(labels=labels):
+                self.assertEqual(classify(self.frame, labels).state, 'unknown')
+
+    def test_entrance_matches_the_red_dot_and_stays_above_the_character_when_scaled(self):
+        # Reference: client origin (12,17), 574x1040; dot at (303,372)
+        # and the central character's head below y=490 in the supplied image.
+        for scale in (.5, 1, 1.5):
+            with self.subTest(scale=scale):
+                width, height = round(574 * scale), round(1040 * scale)
+                frame = np.zeros((height, width, 3), np.uint8)
+                label = text('Explore', round(.77 * width), round(.97 * height))
+                x, y = classify(frame, [label]).targets['dungeon']
+                self.assertAlmostEqual(x / scale + 12, 303, delta=3)
+                self.assertAlmostEqual(y / scale + 17, 372, delta=3)
+                self.assertLess(y / scale + 17, 490 - 100)
+
+    def test_common_controls_and_results_work_without_a_dungeon_heading(self):
+        frame = self.frame.copy()
+        cv2.rectangle(frame, (30, 915), (285, 975), (225, 225, 225), -1)
+        cv2.rectangle(frame, (310, 915), (575, 975), (205, 216, 75), -1)
+        for name in (None, 'Demonseal Gorge', 'Another Dungeon'):
+            heading = [text(name, 300, 80)] if name else []
+            with self.subTest(name=name):
+                self.assertEqual(classify(frame, heading + [text('Team 2/4', 150, 940),
+                                                            text('Match', 440, 940)]).state, 'menu')
+                self.assertEqual(classify(frame, heading + [text('Decline', 150, 940),
+                                                            text('Accept', 440, 940)]).state, 'accept')
+                self.assertEqual(classify(results_image(), heading + [text('Drops', 70, 760)]).state,
+                                 'results')
+
+    def test_marked_entrance_point_is_translated_from_a_letterboxed_game(self):
+        frame = np.zeros((1100, 1400, 3), dtype=np.uint8)
+        frame[:, 400:1000] = 70
+        def reader(image, **kwargs):
+            if image.shape[0] != 1100:
+                return None, None
+            return [([[400, 1040], [460, 1040], [460, 1060], [400, 1060]], 'Explore', .99)], None
+        view = Recognizer(reader).inspect(Image.fromarray(frame))
+        self.assertEqual(view.targets['dungeon'], (703, 374))
 
     def test_likes_and_return_detected_without_templates_at_multiple_sizes(self):
         for scale in (.6, 1, 1.5):
@@ -176,7 +224,9 @@ class VisionTests(unittest.TestCase):
             self.assertEqual(len(likes), 3 - liked)
 
     def test_zero_detected_thumbs_without_click_history_never_allows_exit(self):
-        view = classify(self.frame, [self.title, text("Drops", 70, 760)])
+        frame = self.frame.copy()
+        frame[180:280] = (205, 215, 100)
+        view = classify(frame, [text("Drops", 70, 760)])
         self.assertEqual(view.state, "results")
         self.assertFalse(view.likes_ready)
         self.assertEqual(view.likes, [])
@@ -274,6 +324,7 @@ class VisionTests(unittest.TestCase):
     def test_ocr_box_coordinates_are_translated_out_of_letterboxing(self):
         frame = np.zeros((1100, 1400, 3), dtype=np.uint8)
         frame[:, 400:1000] = 70
+        cv2.rectangle(frame, (430, 925), (685, 975), (225, 225, 225), -1)
         cv2.rectangle(frame, (710, 925), (975, 975), (205, 216, 75), -1)
         labels = [("Demonseal Gorge - Hard", (300, 80)), ("Accept", (440, 950)), ("Decline", (160, 950))]
         def reader(image, **kwargs):
