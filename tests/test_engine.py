@@ -108,8 +108,27 @@ class EngineTests(unittest.TestCase):
     def test_stuck_click_pauses_instead_of_spamming(self):
         e = Engine()
         e.step(views(), 0)
-        with self.assertRaises(SafetyStop):
-            e.step(views(), 10)
+        self.assertIsNone(e.step(views(), 1.99))
+        self.assertEqual(e.step(views(), 2).kind, 'dungeon')
+        self.assertEqual(e.step(views(), 4).kind, 'dungeon')
+        with self.assertRaisesRegex(SafetyStop, 'dungeon menu not detected after 3 entrance clicks'):
+            e.step(views(), 6)
+
+    def test_loading_after_an_entrance_click_has_no_confirmation_timer(self):
+        e = Engine()
+        e.step(views(), 0)
+        self.assertIsNone(e.pending[1])
+        for now in (10, 60, 3600):
+            self.assertIsNone(e.step(views('unknown'), now))
+        self.assertEqual(e.dungeon_attempts, 1)
+        self.assertEqual(e.step(views('menu'), 3601).kind, 'match')
+
+    def test_entering_the_queue_confirms_the_gate_without_needing_a_menu_frame(self):
+        e = Engine()
+        e.step(views(), 0)
+        self.assertIsNone(e.step(views('queue', 'queue'), 2))
+        self.assertIsNone(e.pending)
+        self.assertIsNone(e.step(views('queue', 'queue'), 60))
 
     def test_exit_confirmation_still_detects_an_account_that_did_not_leave(self):
         e = Engine()
@@ -121,11 +140,20 @@ class EngineTests(unittest.TestCase):
 
     def test_pause_preserves_pending_deadline(self):
         e = Engine()
+        v = views('results', 'results')
+        e.step(v, 0)
+        e.step(v, 2)
+        e.rebase_after_pause(100)
+        self.assertIsNone(e.step(v, 105))
+        with self.assertRaises(SafetyStop):
+            e.step(v, 127)
+
+    def test_pause_preserves_the_delay_before_retrying_the_gate(self):
+        e = Engine()
         e.step(views(), 0)
         e.rebase_after_pause(100)
-        self.assertIsNone(e.step(views(), 105))
-        with self.assertRaises(SafetyStop):
-            e.step(views(), 110)
+        self.assertIsNone(e.step(views(), 101.99))
+        self.assertEqual(e.step(views(), 102).kind, 'dungeon')
 
     def test_unknown_combat_screens_produce_no_actions(self):
         e = Engine()
@@ -174,7 +202,8 @@ class EngineTests(unittest.TestCase):
 
     def test_accept_preempts_an_unrelated_expired_confirmation(self):
         e = Engine()
-        e.step(views(), 0)
+        e.step(views('results', 'results'), 0)
+        e.step(views('results', 'results'), 1)
         self.assertEqual(e.step(views("accept", "accept"), 30).role, "leader")
         self.assertIsNone(e.pending)
         self.assertEqual(e.step(views("accept", "accept"), 31.5).role, "member")
@@ -190,14 +219,17 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(SafetyStop):
             e.step(views("menu"), 61)
 
-    def test_resume_renews_expired_confirmation_instead_of_repausing(self):
+    def test_resume_rearms_gate_retries_instead_of_repausing(self):
         e = Engine()
         e.step(views(), 0)
+        e.step(views(), 2)
+        e.step(views(), 4)
         with self.assertRaises(SafetyStop):
-            e.step(views(), 10)
-        e.on_resume(11)
-        self.assertIsNone(e.step(views(), 11))
-        self.assertEqual(e.step(views("menu"), 12).kind, "match")
+            e.step(views(), 6)
+        e.on_resume(7)
+        self.assertIsNone(e.step(views(), 7))
+        self.assertEqual(e.step(views(), 9).kind, 'dungeon')
+        self.assertEqual(e.step(views("menu"), 9.1).kind, "match")
 
     def test_missing_like_detection_does_not_exit_fresh_results(self):
         e = Engine()

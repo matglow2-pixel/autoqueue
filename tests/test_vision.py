@@ -90,6 +90,29 @@ class VisionTests(unittest.TestCase):
         view = recognizer.inspect(Image.fromarray(frame))
         self.assertNotEqual(view.state, 'accept')
 
+    def test_new_match_button_overrides_a_cached_outside_hud(self):
+        frame = self.frame.copy()
+        cv2.putText(frame, 'Explore', (400, 1070), cv2.FONT_HERSHEY_SIMPLEX,
+                    .6, (225, 225, 225), 2)
+        menu_open = [False]
+        def reader(image, **kwargs):
+            if image.shape[0] != 1100:
+                return None, None
+            labels = [('Explore', 430, 1060)]
+            if menu_open[0]:
+                labels.extend([('Team 2/4', 150, 940), ('Match', 440, 940)])
+            return [([[x-30, y-10], [x+30, y-10], [x+30, y+10], [x-30, y+10]], value, .99)
+                    for value, x, y in labels], None
+        recognizer = Recognizer(reader)
+        self.assertEqual(recognizer.inspect(Image.fromarray(frame)).state, 'world')
+        self.assertIn('default', recognizer.cache)
+        menu_open[0] = True
+        cv2.rectangle(frame, (30, 915), (285, 975), (225, 225, 225), -1)
+        cv2.rectangle(frame, (310, 915), (575, 975), (205, 216, 75), -1)
+        view = recognizer.inspect(Image.fromarray(frame))
+        self.assertEqual(view.state, 'menu')
+        self.assertEqual(view.targets['match'], (440, 940))
+
     def test_gold_reward_badges_do_not_turn_a_queue_into_results(self):
         frame = results_image(liked=3)
         frame[180:280] = (25, 52, 49)  # No results rank banner on the queue.

@@ -6,7 +6,7 @@ import threading
 import time
 from pathlib import Path
 
-from .engine import Engine, SafetyStop, WindowUnavailable, View, RESULTS_WAIT
+from .engine import Engine, SafetyStop, WindowUnavailable, View, RESULTS_WAIT, MAX_DUNGEON_ATTEMPTS
 from .vision import Recognizer, remember_like_patches, clicked_likes_cleared
 
 
@@ -294,8 +294,12 @@ class Runner(threading.Thread):
                                 planned.pending = pending_action, deadline + clicked_at - decision_time
                             if pending_action.kind == "match":
                                 planned.match_retry_at += clicked_at - decision_time
+                            elif pending_action.kind == "dungeon":
+                                planned.dungeon_retry_at += clicked_at - decision_time
                         self.engine = planned
-                    self.send("log", f"{action.role}: {action.kind}")
+                    label = (f"open gate (attempt {planned.dungeon_attempts}/{MAX_DUNGEON_ATTEMPTS})"
+                             if action.kind == "dungeon" else action.kind)
+                    self.send("log", f"{action.role}: {label}")
             except WindowUnavailable as error:
                 if action is not None:
                     self.window_unavailable(action.role, error)

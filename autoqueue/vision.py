@@ -55,6 +55,7 @@ class Recognizer:
         if cached and cached[0] == frame.shape and time.monotonic() - cached[1] < 10:
             _, _, view, anchors = cached
             if (all(anchor_matches(frame, box, patch) for box, patch in anchors)
+                    and not (view.state == "world" and yellow_button_present(frame))
                     and (view.state != "accept" or button_color_fraction(
                         frame, view.targets["accept"], yellow=True) > .25)):
                 return translate(view, offset)

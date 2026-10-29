@@ -33,12 +33,13 @@ class FakeWindow:
 
 
 class RunnerTests(unittest.TestCase):
-    def test_three_cycles_recover_a_missed_leader_accept_in_second_cycle(self):
+    def test_three_cycles_recover_a_missed_gate_click_and_accept_in_second_cycle(self):
         states = {'leader': 'world', 'member': 'world'}
         remaining = {}
         clock = [0.0]
         cycles = [0]
         missed = [False]
+        missed_gate = [False]
         actions = []
         class CycleOCR:
             def inspect(self, image, role='default'):
@@ -64,7 +65,10 @@ class RunnerTests(unittest.TestCase):
                 role, state = self.role, states[self.role]
                 actions.append((cycles[0], role, state, point, clock[0]))
                 if state == 'world':
-                    states[role] = 'menu'
+                    if cycles[0] == 1 and not missed_gate[0]:
+                        missed_gate[0] = True
+                    else:
+                        states[role] = 'menu'
                 elif state == 'menu':
                     states.update(leader='accept', member='accept')
                     for r in states:
@@ -100,6 +104,10 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual([a[1] for a in accepts],
                              ['leader', 'member', 'leader', 'member', 'leader', 'leader', 'member'])
             self.assertTrue(all(b[-1] - a[-1] >= 1.5 for a, b in zip(accepts, accepts[1:])))
+            gate_clicks = [a for a in actions if a[2] == 'world']
+            self.assertEqual([a[0] for a in gate_clicks], [0, 1, 1, 2])
+            self.assertTrue(all(a[1] == 'leader' for a in gate_clicks))
+            self.assertGreaterEqual(gate_clicks[2][-1] - gate_clicks[1][-1], 2)
             for cycle in (0, 1):
                 leader_exit = next(a[-1] for a in actions if a[:3] == (cycle, 'leader', 'results')
                                    and a[3] == (66, 1050))

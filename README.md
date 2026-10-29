@@ -1,4 +1,4 @@
-# Sword x Staff Autoqueue — OCR 1.9
+# Sword x Staff Autoqueue — OCR 1.10
 
 **Choose Leader, choose Member, press Start. No calibration.**
 
@@ -43,7 +43,10 @@ using the PC for something else. No ADB is required.
 
 ## What happens
 
-1. Only the leader opens the dungeon entrance and presses **Match**.
+1. Only the leader opens the dungeon entrance and presses **Match**. If an entrance
+   tap is ignored, it retries your marked point **two seconds apart, up to three
+   total attempts**, only while the outside HUD is visible. Loading/unreadable
+   screens keep waiting without a ten-second entrance-confirmation timer.
 2. Both accounts press **Accept**, at least **1.5 seconds apart**. A declined match
    returns to waiting for the next prompt. **Matchmaking has no timeout**: queues
    lasting a minute or longer keep running, including when queue OCR is unreadable.
@@ -72,13 +75,16 @@ pass is only a fallback. Cancel and
 Matchmaking detection do not require a correctly read dungeon name. If Match is
 still positively visible, failed clicks get up to three attempts; an unknown or
 queued screen never triggers that retry limit or a matchmaking timer. Resuming
-after other confirmation failures renews their deadlines instead of immediately
-pausing again on an already-expired timestamp.
-Dungeon and Match have no deliberate per-button cooldown. The loop
+after confirmation failures renews cleanup deadlines or rearms click retries
+instead of immediately pausing again on an old failure.
+The first entrance click and the Match click have no deliberate cooldown. Retries
+wait two seconds so the game can respond. The loop
 checks again after 20 milliseconds plus screen capture/processing time. After OCR
 first locates the labels, fresh screenshots validate small label patches instead
 of repeatedly running full-window OCR. A changed label triggers OCR again. These
 temporary anchors are automatic and kept in memory; no calibration is needed.
+An appearing yellow action button invalidates a cached outside screen, so a new
+Match/Accept menu is read even if its background still shows the Explore label.
 Screen capture copies only each game rectangle through MSS, rather than copying
 the entire desktop separately for each game. Run setup again to install MSS.
 Results use the large rank banner and Drops divider to recognize the end screen
@@ -172,8 +178,12 @@ attachment cleanup, cancellation and retrying an unsent click after focus change
 Those fixtures are not live game captures; passing them does not establish live
 BlueStacks accuracy. The Windows desktop adapter cannot execute on Linux.
 Regression coverage includes three consecutive complete cycles, a leader Accept
-tap ignored by the game in the second cycle, visibility recovery, and accepting
+tap and entrance tap ignored by the game in the second cycle, visibility recovery, and accepting
 on the uncovered account while its partner is temporarily covered.
 Dungeon-independent tests cover missing and different headings, the marked point
 at several sizes and within letterboxing, and rejection of Explore text in chat.
 The real OCR models also read the common controls on screens with no dungeon name.
+Entrance regressions cover bounded retries, indefinite waiting during unreadable
+transitions, entering a queue without observing its menu frame, and a new Match
+button overriding a cached outside HUD. The real OCR replay leaves Explore
+visible beneath menus to exercise that transition.

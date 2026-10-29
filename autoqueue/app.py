@@ -19,7 +19,7 @@ class App:
         self.windows = []
         self.selectors = {}
         self.hotkeys = Hotkeys()
-        root.title("Sword x Staff Autoqueue — OCR 1.9")
+        root.title("Sword x Staff Autoqueue — OCR 1.10")
         root.geometry("760x440")
         ttk.Label(root, text="Sword x Staff Autoqueue", font=("Segoe UI", 17)).pack(pady=12)
         ttk.Label(root, text="Select the two game windows, then Start. Buttons are detected automatically.").pack()

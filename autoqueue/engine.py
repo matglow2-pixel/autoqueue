@@ -11,6 +11,8 @@ class WindowUnavailable(SafetyStop):
 
 
 RESULTS_WAIT = 1.0
+DUNGEON_RETRY_SECONDS = 2.0
+MAX_DUNGEON_ATTEMPTS = 3
 
 
 @dataclass
@@ -44,6 +46,8 @@ class Engine:
         self.runs = 0
         self.match_attempts = 0
         self.match_retry_at = 0.0
+        self.dungeon_attempts = 0
+        self.dungeon_retry_at = 0.0
         self.requeue_at = 0.0
 
     def step(self, views: dict[str, View], now: float) -> Action | None:
@@ -66,6 +70,7 @@ class Engine:
         if any(v.state == "accept" for v in views.values()):
             self.pending = None
             self.match_attempts = 0
+            self.dungeon_attempts = 0
             if self.results:
                 self.results = False
                 self.finished.clear()
@@ -89,7 +94,7 @@ class Engine:
             if view.state == "blocked":
                 return None
             expected = {
-                "dungeon": {"menu"},
+                "dungeon": {"menu", "queue", "accepted", "results"},
                 "match": {"queue", "world", "results"},
                 "cleanup": {"world", "menu", "queue"},
             }
@@ -98,8 +103,22 @@ class Engine:
                 self.pending = None
                 if action.kind == "match":
                     self.match_attempts = 0
+                if action.kind == "dungeon":
+                    self.dungeon_attempts = 0
                 if action.kind == "cleanup":
                     self.finished.add(action.role)
+            elif action.kind == "dungeon":
+                # A tap during the return animation may be ignored. Retry the
+                # same marked point only while the outside HUD is confirmed.
+                # An unreadable/loading frame never authorizes a retry or pause.
+                if view.state == "world" and now >= self.dungeon_retry_at:
+                    if self.dungeon_attempts >= MAX_DUNGEON_ATTEMPTS:
+                        raise SafetyStop(
+                            f"{action.role}: dungeon menu not detected after {MAX_DUNGEON_ATTEMPTS} entrance clicks. "
+                            "Check the leader's game screen, then press F8."
+                        )
+                    return self.emit(Action(action.role, "dungeon"), now)
+                return None
             elif action.kind == "match":
                 # An unreadable queue/transition is still a queue wait. There
                 # is no deadline for a match to be found. Only a positively
@@ -146,7 +165,7 @@ class Engine:
         if views["member"].state not in {"world", "queue"}:
             return None
         if views["leader"].state == "world":
-            return self.emit(Action("leader", "dungeon"), now, timeout=10)
+            return self.emit(Action("leader", "dungeon"), now)
         if views["leader"].state == "menu":
             return self.emit(Action("leader", "match"), now)
         return None
@@ -159,7 +178,11 @@ class Engine:
         self.next_click = now
         if action.kind == "cleanup" and action.role == "leader":
             self.requeue_at = now + 5
-        if action.kind == "match":
+        if action.kind == "dungeon":
+            self.pending = (action, None)
+            self.dungeon_attempts += 1
+            self.dungeon_retry_at = now + DUNGEON_RETRY_SECONDS
+        elif action.kind == "match":
             self.pending = (action, None)
             self.match_attempts += 1
             self.match_retry_at = now + 2
@@ -171,13 +194,16 @@ class Engine:
         """Give a fresh confirmation window instead of rethrowing old deadlines."""
         if self.pending:
             action, _ = self.pending
-            if action.kind == "match":
+            if action.kind == "dungeon":
+                self.pending = (action, None)
+                self.dungeon_attempts = 0
+                self.dungeon_retry_at = now + DUNGEON_RETRY_SECONDS
+            elif action.kind == "match":
                 self.pending = (action, None)
                 self.match_attempts = 0
                 self.match_retry_at = now + 2
             else:
-                timeout = {"dungeon": 10, "cleanup": 25}[action.kind]
-                self.pending = (action, now + timeout)
+                self.pending = (action, now + 25)
 
     def rebase_after_pause(self, duration):
         """Paused time must not consume confirmation deadlines or delays."""
@@ -188,6 +214,7 @@ class Engine:
         self.last_accept += duration
         self.accept_sent_at = {r: t + duration for r, t in self.accept_sent_at.items()}
         self.match_retry_at += duration
+        self.dungeon_retry_at += duration
         self.requeue_at += duration
         self.results_seen = {r: t + duration for r, t in self.results_seen.items()}
         self.absent_since = {r: t + duration for r, t in self.absent_since.items()}
